@@ -57,9 +57,12 @@ class ChatScrollElement extends RenderObjectElement
     ); // -> updateRenderObject (dataSource/controller/...)
     // No builder is handed to the render object; if any changed, drop the
     // skip-cache and force a layout so every active child re-inflates.
-    if (!identical(old.messageBuilder, newWidget.messageBuilder) ||
-        !identical(old.selectionController, newWidget.selectionController) ||
-        !identical(old.dateSeparatorBuilder, newWidget.dateSeparatorBuilder)) {
+    // Use `==` instead of `identical` — instance-method tear-offs are equal
+    // across accesses but not necessarily identical, so `identical` here
+    // would force every parent rebuild to throw away the skip-cache.
+    if (old.messageBuilder != newWidget.messageBuilder ||
+        old.selectionController != newWidget.selectionController ||
+        old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder) {
       _builtMessage.clear();
       _builtStatus.clear();
       _builtStartsDay.clear();
@@ -67,7 +70,7 @@ class ChatScrollElement extends RenderObjectElement
     }
     // A changed separator builder must rebuild the header even if the day did
     // not change — the day-bucket gate alone would skip it.
-    if (!identical(old.dateSeparatorBuilder, newWidget.dateSeparatorBuilder)) {
+    if (old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder) {
       renderObject.invalidateFloatingHeader();
     }
   }

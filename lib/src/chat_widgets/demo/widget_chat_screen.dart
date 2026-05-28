@@ -71,6 +71,25 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
     _controller.jumpTo(count - 1);
   }
 
+  /// Stable per-state tear-off — same reference for the widget's lifetime,
+  /// so the viewport's skip-rebuild cache stays warm across parent rebuilds.
+  /// Consults the previous message via the data source to suppress repeated
+  /// sender/avatar for messages in the same run.
+  Widget _buildMessage(
+    BuildContext context,
+    int id,
+    IChatMessage? message,
+    ChatMessageStatus status,
+  ) {
+    if (message == null) return const DemoShimmerBubble();
+    final prev = _dataSource?.getMessage(id - 1);
+    final isFirstInRun = prev?.sender != message.sender;
+    return DemoMessageBubble(
+      message: message,
+      isFirstInRun: isFirstInRun,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading || _dataSource == null) {
@@ -88,7 +107,7 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
                 controller: _controller,
                 selectionController: _selection,
                 bottomPadding: _bottomInset,
-                messageBuilder: buildDemoMessage,
+                messageBuilder: _buildMessage,
                 dateSeparatorBuilder: (context, date) =>
                     DateSeparator(date: date),
               ),
