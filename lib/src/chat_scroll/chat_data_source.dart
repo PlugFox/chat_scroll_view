@@ -7,33 +7,6 @@ import 'package:chatscrollview/src/chat_scroll/chat_scroll_chunk.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_common.dart';
 import 'package:meta/meta.dart';
 
-/// Bootstrap result returned by [ChatDataSource.fetchInitial].
-///
-/// Carries the first page of messages along with the boundary metadata the
-/// viewport needs to position the anchor and know where the conversation
-/// ends — so the consumer doesn't have to mirror this state onto the
-/// controller manually.
-typedef ChatInitialPage = ({
-  /// Messages to seed the chunk cache with — typically the newest page.
-  List<IChatMessage> messages,
-
-  /// Lowest known id at bootstrap time (`null` if completely unknown — the
-  /// data source has no idea what the oldest id is yet).
-  int? oldestId,
-
-  /// Highest known id at bootstrap time. `null` only when the conversation
-  /// is empty (then anchor stays at its default).
-  int? newestId,
-
-  /// Whether [oldestId] is the very first message of the conversation
-  /// (`reachedOldest`). Default to `false` when unknown.
-  bool reachedOldest,
-
-  /// Whether [newestId] is the very last message of the conversation
-  /// (`reachedNewest`). Default to `false` when unknown.
-  bool reachedNewest,
-});
-
 /// Data source for [ChatScrollView].
 ///
 /// Owns message data (chunks), the fetch contract, and the conversation
@@ -54,23 +27,6 @@ abstract class ChatDataSource {
     required int fromId,
     required int toId,
   });
-
-  /// Optional bootstrap: load the first page when no boundary is known yet.
-  ///
-  /// The viewport calls this once on first layout if [newestKnownId] is
-  /// `null`. Default implementation throws — override to enable automatic
-  /// initial load. Consumers that prepare their data before mounting can
-  /// skip overriding and configure boundaries explicitly via
-  /// [seedBoundaries] / [upsertMessages] / [ChatScrollController.jumpTo].
-  ///
-  /// [limit] hints how many messages the viewport wants — the data source
-  /// is free to return more or fewer.
-  Future<ChatInitialPage> fetchInitial({int? limit}) =>
-      throw UnimplementedError(
-        '$runtimeType does not implement fetchInitial — either override it '
-        'or seed boundaries + messages explicitly before mounting the '
-        'viewport.',
-      );
 
   /// Maximum number of chunks to keep in memory.
   /// Override to control the memory/re-fetch tradeoff.

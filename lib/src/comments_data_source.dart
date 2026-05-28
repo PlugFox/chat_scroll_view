@@ -113,33 +113,6 @@ class CommentsDataSource extends ChatDataSource {
     return result;
   }
 
-  @override
-  Future<ChatInitialPage> fetchInitial({int? limit}) async {
-    // We know the bounds of the manifest upfront — fetchInitial just hands
-    // them over with a slice of the newest page.
-    final total = manifest.totalMessages;
-    if (total <= 0) {
-      return (
-        messages: const <IChatMessage>[],
-        oldestId: null,
-        newestId: null,
-        reachedOldest: true,
-        reachedNewest: true,
-      );
-    }
-    final pageSize = limit ?? 64;
-    final fromId = (total - pageSize).clamp(0, total - 1);
-    final toId = total - 1;
-    final messages = await fetchRange(fromId: fromId, toId: toId);
-    return (
-      messages: messages,
-      oldestId: 0,
-      newestId: total - 1,
-      reachedOldest: true,
-      reachedNewest: true,
-    );
-  }
-
   Future<List<IChatMessage>> _loadAssetChunk(int assetChunkIndex) async {
     // Cache hit — re-promote to most-recently-used.
     final cached = _chunkCache.remove(assetChunkIndex);
