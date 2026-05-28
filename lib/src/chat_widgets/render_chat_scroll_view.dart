@@ -119,7 +119,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   set controller(ChatScrollController value) {
     if (identical(_controller, value)) return;
     if (attached) {
-      _cancelAnimate(notify: false);
+      _cancelAnimate();
       _controller
         ..removeJumpListener(_onJump)
         ..animator = null;
@@ -438,7 +438,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _controller
       ..removeJumpListener(_onJump)
       ..animator = null;
-    _cancelAnimate(notify: false);
+    _cancelAnimate();
     _bottomPadding?.removeListener(_onBottomPaddingChanged);
     _topPadding?.removeListener(_onTopPaddingChanged);
     _drag?.dispose();
@@ -933,7 +933,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     required Curve curve,
   }) {
     // Re-entrant animateTo: cancel the in-flight one, schedule the new one.
-    _cancelAnimate(notify: true);
+    _cancelAnimate();
     if (duration <= Duration.zero) {
       _controller.jumpTo(targetId);
       return Future<void>.value();
@@ -979,7 +979,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     return _parentData(child).offset;
   }
 
-  void _cancelAnimate({required bool notify}) {
+  void _cancelAnimate() {
     final completer = _animateCompleter;
     if (completer == null) return;
     _animateCompleter = null;
@@ -991,10 +991,9 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       _fadeLayer.layer = null;
       markNeedsPaint();
     }
+    // Completing the completer resumes `ChatScrollController.animateTo`, which
+    // emits `ChatAnimateEnd` in its `finally` — don't emit it here too.
     if (!completer.isCompleted) completer.complete();
-    if (notify) {
-      _controller.notifyScrollEvent(ChatAnimateEnd(_animateTargetId));
-    }
   }
 
   /// Drive the in-flight animation by one tick. Returns the additional scroll
@@ -1082,7 +1081,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _renormalizeAnchor();
     if (_clampBoundaries()) {
       _cancelFling();
-      _cancelAnimate(notify: true);
+      _cancelAnimate();
     }
     _updateScrollSemantics();
     _publishVisibleRange();
@@ -1179,7 +1178,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
 
   void _onDragStart(DragStartDetails details) {
     _cancelFling();
-    _cancelAnimate(notify: true);
+    _cancelAnimate();
     _ensureTicker();
     _controller.notifyScrollEvent(const ChatUserDragStart());
   }
@@ -1498,7 +1497,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   @override
   void dispose() {
     _cancelFling();
-    _cancelAnimate(notify: false);
+    _cancelAnimate();
     _ticker?.dispose();
     _ticker = null;
     _pollTimer?.cancel();

@@ -112,9 +112,11 @@ class ChatScrollView extends RenderObjectWidget {
   /// (`==`) share a section. Consulted only when [dateSeparatorBuilder] is
   /// set; defaults to the local calendar day.
   ///
-  /// Return any equatable value: a `DateTime` truncated to the day for daily
-  /// grouping, a `(year, week)` record for weekly, a sender name for sender
-  /// grouping. Pass a stable reference.
+  /// The separator builder always receives the first message's `createdAt`
+  /// for each section, so return a date-derived equatable value: a
+  /// `DateTime` truncated to the day (the default), a `(year, week)` record
+  /// for weekly grouping, or `(year, month)` for monthly. Pass a stable
+  /// reference.
   final Object Function(IChatMessage message)? groupBy;
 
   /// Pixels above and below the viewport to keep built.

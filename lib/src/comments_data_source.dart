@@ -47,7 +47,17 @@ class CommentsDataSource extends ChatDataSource {
     required this.assetPrefix,
     required this.fetchDelay,
     required this.maxCachedChunks,
-  });
+  }) {
+    final total = manifest.totalMessages;
+    if (total > 0) {
+      seedBoundaries(
+        oldestKnownId: 0,
+        newestKnownId: total - 1,
+        reachedOldest: true,
+        reachedNewest: true,
+      );
+    }
+  }
 
   /// Load manifest and return a ready-to-use data source.
   static Future<CommentsDataSource> load({

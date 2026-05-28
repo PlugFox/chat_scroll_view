@@ -17,12 +17,15 @@ import 'package:flutter_test/flutter_test.dart';
 /// Mixin: seed `[0, count-1]` boundaries at construction.
 mixin _BoundedSource on ChatDataSource {
   int get count;
-  void _seed() => seedBoundaries(
-    oldestKnownId: 0,
-    newestKnownId: count - 1,
-    reachedOldest: true,
-    reachedNewest: true,
-  );
+  void _seed() {
+    if (count <= 0) return;
+    seedBoundaries(
+      oldestKnownId: 0,
+      newestKnownId: count - 1,
+      reachedOldest: true,
+      reachedNewest: true,
+    );
+  }
 }
 
 /// All messages preloaded; [fetchRange] is a no-op (range never needs fetch).
