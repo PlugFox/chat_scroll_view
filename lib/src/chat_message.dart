@@ -23,8 +23,10 @@ sealed class ChatMessage implements IChatMessage {
   final DateTime updatedAt;
 }
 
-class ChatMessage$System extends ChatMessage {
-  const ChatMessage$System({
+/// A system-authored message — service notifications, join/leave notices,
+/// channel events. `sealed`-pattern leaf of [ChatMessage].
+class SystemChatMessage extends ChatMessage {
+  const SystemChatMessage({
     required super.id,
     required super.sender,
     required super.createdAt,
@@ -36,8 +38,9 @@ class ChatMessage$System extends ChatMessage {
   final String content;
 }
 
-class ChatMessage$User extends ChatMessage {
-  const ChatMessage$User({
+/// A user-authored message. `sealed`-pattern leaf of [ChatMessage].
+class UserChatMessage extends ChatMessage {
+  const UserChatMessage({
     required super.id,
     required super.sender,
     required super.createdAt,

@@ -28,8 +28,8 @@ class _Bubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final content = switch (message) {
-      ChatMessage$User(:final content) => content,
-      ChatMessage$System(:final content) => content,
+      UserChatMessage(:final content) => content,
+      SystemChatMessage(:final content) => content,
       _ => 'Message #${message.id}',
     };
     return Padding(
@@ -60,11 +60,21 @@ class _Bubble extends StatelessWidget {
 class _Preloaded extends ChatDataSource {
   _Preloaded(List<IChatMessage> messages) {
     upsertMessages(messages);
+    if (messages.isNotEmpty) {
+      seedBoundaries(
+        oldestKnownId: 0,
+        newestKnownId: messages.length - 1,
+        reachedOldest: true,
+        reachedNewest: true,
+      );
+    }
   }
 
   @override
-  Future<List<IChatMessage>> fetch({int? from, int? to, DateTime? after}) async =>
-      const <IChatMessage>[];
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
+  }) async => const <IChatMessage>[];
 }
 
 Widget _csvApp(List<IChatMessage> msgs, ChatScrollController ctrl) => MaterialApp(
@@ -137,12 +147,7 @@ void main() {
       final messages = generateMessages(count);
 
       // --- Widget ChatScrollView ---
-      final ctrl = ChatScrollController()
-        ..oldestKnownId = 0
-        ..newestKnownId = count - 1
-        ..reachedOldest = true
-        ..reachedNewest = true;
-      ctrl.jumpTo(count - 1);
+      final ctrl = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(_csvApp(messages, ctrl));
       await tester.pumpAndSettle();
       ctrl.jumpTo(count ~/ 2);

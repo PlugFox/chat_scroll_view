@@ -51,8 +51,8 @@ class DemoMessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final content = switch (message) {
-      ChatMessage$User(:final content) => content,
-      ChatMessage$System(:final content) => content,
+      UserChatMessage(:final content) => content,
+      SystemChatMessage(:final content) => content,
       _ => 'Message #${message.id}',
     };
     final isTeam = _teamMembers.contains(message.sender);

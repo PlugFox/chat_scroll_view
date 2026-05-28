@@ -62,12 +62,13 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
   }
 
   void _configure(int count) {
-    _controller
-      ..oldestKnownId = 0
-      ..newestKnownId = count - 1
-      ..reachedOldest = true
-      ..reachedNewest = true
-      ..jumpTo(count - 1);
+    _dataSource!.seedBoundaries(
+      oldestKnownId: 0,
+      newestKnownId: count - 1,
+      reachedOldest: true,
+      reachedNewest: true,
+    );
+    _controller.jumpTo(count - 1);
   }
 
   @override
@@ -131,17 +132,16 @@ class _DemoDataSource extends ChatDataSource {
   final DateTime _baseTime = DateTime.now();
 
   @override
-  Future<List<IChatMessage>> fetch({
-    int? from,
-    int? to,
-    DateTime? after,
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
   }) async {
     await Future<void>.delayed(const Duration(milliseconds: 150));
-    final lo = (from ?? 0).clamp(0, messageCount - 1);
-    final hi = (to ?? messageCount - 1).clamp(0, messageCount - 1);
+    final lo = fromId.clamp(0, messageCount - 1);
+    final hi = toId.clamp(0, messageCount - 1);
     return <IChatMessage>[
       for (var i = lo; i <= hi; i++)
-        ChatMessage$User(
+        UserChatMessage(
           id: i,
           sender: 'User',
           // Spread messages across days so the date separators have something

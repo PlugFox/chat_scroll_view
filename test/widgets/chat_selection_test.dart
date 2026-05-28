@@ -17,17 +17,24 @@ import 'package:flutter_test/flutter_test.dart';
 class _PreloadedDataSource extends ChatDataSource {
   _PreloadedDataSource(List<IChatMessage> messages) {
     upsertMessages(messages);
+    if (messages.isNotEmpty) {
+      seedBoundaries(
+        oldestKnownId: 0,
+        newestKnownId: messages.length - 1,
+        reachedOldest: true,
+        reachedNewest: true,
+      );
+    }
   }
 
   @override
-  Future<List<IChatMessage>> fetch({
-    int? from,
-    int? to,
-    DateTime? after,
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
   }) async => const <IChatMessage>[];
 }
 
-IChatMessage _msg(int i) => ChatMessage$User(
+IChatMessage _msg(int i) => UserChatMessage(
   id: i,
   sender: 'User',
   createdAt: DateTime(2026),
@@ -38,12 +45,6 @@ IChatMessage _msg(int i) => ChatMessage$User(
 List<IChatMessage> _generate(int n) => <IChatMessage>[
   for (var i = 0; i < n; i++) _msg(i),
 ];
-
-ChatScrollController _boundedController(int count) => ChatScrollController()
-  ..oldestKnownId = 0
-  ..newestKnownId = count - 1
-  ..reachedOldest = true
-  ..reachedNewest = true;
 
 Widget _harness({
   required ChatDataSource dataSource,
@@ -78,7 +79,7 @@ void main() {
     testWidgets('wraps messages in SelectableMessage when a controller is '
         'provided', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -95,7 +96,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -112,7 +113,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final selection = ChatSelectionController();
       await tester.pumpWidget(
         _harness(
@@ -135,7 +136,7 @@ void main() {
 
     testWidgets('tap toggles messages while in selection mode', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final selection = ChatSelectionController();
       await tester.pumpWidget(
         _harness(
@@ -164,7 +165,7 @@ void main() {
 
     testWidgets('tap does nothing outside selection mode', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final selection = ChatSelectionController();
       await tester.pumpWidget(
         _harness(
@@ -186,7 +187,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final selection = ChatSelectionController();
       await tester.pumpWidget(
         _harness(
@@ -212,7 +213,7 @@ void main() {
 
     testWidgets('clearing selection exits selection mode', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final selection = ChatSelectionController();
       await tester.pumpWidget(
         _harness(

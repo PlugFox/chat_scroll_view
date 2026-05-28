@@ -27,10 +27,12 @@ typedef ChatMessageBuilder =
 typedef ChatDateSeparatorBuilder =
     Widget Function(BuildContext context, DateTime date);
 
-/// Default day grouping — the local calendar day as a comparable int.
-int _defaultDayBucket(IChatMessage message) {
+/// Default day grouping — the local calendar day. A `DateTime` with
+/// hours/minutes/seconds zeroed is equatable enough for the day-bucket gate;
+/// no need to pack y/m/d into an int.
+DateTime _defaultGroupBy(IChatMessage message) {
   final d = message.createdAt.toLocal();
-  return d.year * 10000 + d.month * 100 + d.day;
+  return DateTime(d.year, d.month, d.day);
 }
 
 /// Widget-based endless chat viewport.
@@ -53,9 +55,10 @@ class ChatScrollView extends RenderObjectWidget {
     this.bottomPadding,
     this.topPadding,
     this.dateSeparatorBuilder,
-    this.dayBucketOf,
+    this.groupBy,
     this.cacheExtent = 250.0,
     this.extraBuildExtent = 0.0,
+    this.reverse = false,
     super.key,
   });
 
@@ -98,17 +101,21 @@ class ChatScrollView extends RenderObjectWidget {
   /// header, so the two are never both visible — the builder is free to style
   /// and pad the separator however it likes.
   ///
-  /// Format the date in the same day notion as [dayBucketOf] (both default to
-  /// the local calendar day) — otherwise a label can disagree with the
-  /// grouping near midnight, e.g. printing UTC dates while grouping by local.
+  /// Format the date in the same day notion as [groupBy] (both default to the
+  /// local calendar day) — otherwise a label can disagree with the grouping
+  /// near midnight, e.g. printing UTC dates while grouping by local.
   ///
   /// Pass a stable reference, like [messageBuilder].
   final ChatDateSeparatorBuilder? dateSeparatorBuilder;
 
-  /// Groups messages into days: messages with an equal returned key share a
-  /// day. Consulted only when [dateSeparatorBuilder] is set; defaults to the
-  /// local calendar day. Pass a stable reference.
-  final int Function(IChatMessage message)? dayBucketOf;
+  /// Groups messages into sections — messages whose returned keys are equal
+  /// (`==`) share a section. Consulted only when [dateSeparatorBuilder] is
+  /// set; defaults to the local calendar day.
+  ///
+  /// Return any equatable value: a `DateTime` truncated to the day for daily
+  /// grouping, a `(year, week)` record for weekly, a sender name for sender
+  /// grouping. Pass a stable reference.
+  final Object Function(IChatMessage message)? groupBy;
 
   /// Pixels above and below the viewport to keep built.
   final double cacheExtent;
@@ -122,9 +129,23 @@ class ChatScrollView extends RenderObjectWidget {
   /// specific children regardless of how far they scroll away.
   final double extraBuildExtent;
 
-  /// The effective day-bucket function, or `null` when day separators are off.
-  int Function(IChatMessage)? get _effectiveDayBucketOf =>
-      dateSeparatorBuilder == null ? null : (dayBucketOf ?? _defaultDayBucket);
+  /// When the entire conversation fits in the viewport, where should the
+  /// content stack?
+  ///
+  /// * `false` (list-style, default): pin the oldest message to the top, gap
+  ///   below the newest. Matches `ListView`-shaped UIs.
+  /// * `true` (chat-style): pin the newest message to the bottom, gap above
+  ///   the oldest. Matches Telegram / iMessage when only a couple of
+  ///   messages exist yet.
+  ///
+  /// Also flips the assistive-tech mapping for `scrollUp`/`scrollDown`
+  /// actions: in `reverse` mode `scrollUp` reveals older history (what
+  /// chat-app users expect).
+  final bool reverse;
+
+  /// The effective grouping function, or `null` when day separators are off.
+  Object Function(IChatMessage)? get _effectiveGroupBy =>
+      dateSeparatorBuilder == null ? null : (groupBy ?? _defaultGroupBy);
 
   @override
   RenderObjectElement createElement() => ChatScrollElement(this);
@@ -137,9 +158,10 @@ class ChatScrollView extends RenderObjectWidget {
         cacheExtent: cacheExtent,
         extraBuildExtent: extraBuildExtent,
         ticking: TickerMode.valuesOf(context).enabled,
+        reverse: reverse,
         bottomPadding: bottomPadding,
         topPadding: topPadding,
-        dayBucketOf: _effectiveDayBucketOf,
+        groupBy: _effectiveGroupBy,
       );
 
   @override
@@ -153,8 +175,9 @@ class ChatScrollView extends RenderObjectWidget {
       ..cacheExtent = cacheExtent
       ..extraBuildExtent = extraBuildExtent
       ..ticking = TickerMode.valuesOf(context).enabled
+      ..reverse = reverse
       ..bottomPadding = bottomPadding
       ..topPadding = topPadding
-      ..dayBucketOf = _effectiveDayBucketOf;
+      ..groupBy = _effectiveGroupBy;
   }
 }

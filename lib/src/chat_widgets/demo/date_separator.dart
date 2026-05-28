@@ -45,7 +45,7 @@ const List<String> _months = <String>[
 /// Formats [date] as a day label: "Сегодня" / "Вчера" / "5 мая" /
 /// "5 мая 2024" (the year is shown only when it differs from the current one).
 ///
-/// Works in the local time zone — to match the default `dayBucketOf`, which
+/// Works in the local time zone — to match the default `groupBy`, which
 /// also groups by the local calendar day. A timestamp parsed from ISO 8601 is
 /// UTC; without this conversion the label could disagree with the grouping
 /// near midnight — two distinct day groups printing the very same date.

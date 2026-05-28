@@ -14,13 +14,20 @@ import 'package:flutter_test/flutter_test.dart';
 class _PreloadedDataSource extends ChatDataSource {
   _PreloadedDataSource(List<IChatMessage> messages) {
     upsertMessages(messages);
+    if (messages.isNotEmpty) {
+      seedBoundaries(
+        oldestKnownId: 0,
+        newestKnownId: messages.length - 1,
+        reachedOldest: true,
+        reachedNewest: true,
+      );
+    }
   }
 
   @override
-  Future<List<IChatMessage>> fetch({
-    int? from,
-    int? to,
-    DateTime? after,
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
   }) async => const <IChatMessage>[];
 }
 
@@ -30,7 +37,7 @@ const int _perDay = 8;
 /// `count` messages, [_perDay] per calendar day starting 2026-01-01.
 List<IChatMessage> _generate(int count) => <IChatMessage>[
   for (var i = 0; i < count; i++)
-    ChatMessage$User(
+    UserChatMessage(
       id: i,
       sender: 'User',
       createdAt: DateTime(2026, 1, 1 + i ~/ _perDay, 9, i % _perDay),
@@ -38,12 +45,6 @@ List<IChatMessage> _generate(int count) => <IChatMessage>[
       content: 'content $i',
     ),
 ];
-
-ChatScrollController _boundedController(int count) => ChatScrollController()
-  ..oldestKnownId = 0
-  ..newestKnownId = count - 1
-  ..reachedOldest = true
-  ..reachedNewest = true;
 
 Widget _harness({
   required ChatDataSource dataSource,
@@ -83,7 +84,7 @@ void main() {
   group('ChatScrollView day separators', () {
     testWidgets('inline date separators mark day boundaries', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(16);
+      final controller = ChatScrollController()..jumpTo(16);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -102,7 +103,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -120,7 +121,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(8);
+      final controller = ChatScrollController()..jumpTo(8);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -146,7 +147,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(8);
+      final controller = ChatScrollController()..jumpTo(8);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -182,7 +183,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -200,7 +201,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(8);
+      final controller = ChatScrollController()..jumpTo(8);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),

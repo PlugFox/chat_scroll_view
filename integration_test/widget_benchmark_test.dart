@@ -46,7 +46,7 @@ List<IChatMessage> _generateMessages(int count) {
   final now = DateTime(2026, 1, 1);
   return [
     for (var i = 0; i < count; i++)
-      ChatMessage$User(
+      UserChatMessage(
         id: i,
         sender: 'User',
         createdAt: now.add(Duration(minutes: i)),
@@ -64,11 +64,21 @@ List<IChatMessage> _generateMessages(int count) {
 class _BenchDataSource extends ChatDataSource {
   _BenchDataSource(List<IChatMessage> messages) {
     upsertMessages(messages);
+    if (messages.isNotEmpty) {
+      seedBoundaries(
+        oldestKnownId: 0,
+        newestKnownId: messages.length - 1,
+        reachedOldest: true,
+        reachedNewest: true,
+      );
+    }
   }
 
   @override
-  Future<List<IChatMessage>> fetch({int? from, int? to, DateTime? after}) async =>
-      const [];
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
+  }) async => const [];
 }
 
 /// Lean bubble — visually equivalent to benchmark_test.dart's `_BenchRender`
@@ -82,8 +92,8 @@ Widget _benchBuilder(
 ) {
   if (message == null) return const SizedBox(height: 60);
   final content = switch (message) {
-    ChatMessage$User(:final content) => content,
-    ChatMessage$System(:final content) => content,
+    UserChatMessage(:final content) => content,
+    SystemChatMessage(:final content) => content,
     _ => 'Message #$id',
   };
   return Padding(
@@ -162,12 +172,7 @@ class _FrameTimingCollector {
 
 ({_BenchDataSource ds, ChatScrollController ctrl}) _setup(int count) {
   final ds = _BenchDataSource(_generateMessages(count));
-  final ctrl = ChatScrollController()
-    ..oldestKnownId = 0
-    ..newestKnownId = count - 1
-    ..reachedOldest = true
-    ..reachedNewest = true;
-  ctrl.jumpTo(count - 1);
+  final ctrl = ChatScrollController()..jumpTo(count - 1);
   return (ds: ds, ctrl: ctrl);
 }
 

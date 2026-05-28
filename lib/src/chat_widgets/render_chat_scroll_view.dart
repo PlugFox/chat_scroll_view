@@ -5,7 +5,9 @@ import 'package:chatscrollview/src/chat_scroll/chat_data_source.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_chunk.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_common.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_controller.dart';
+import 'package:chatscrollview/src/chat_scroll/chat_scroll_events.dart';
 import 'package:chatscrollview/src/chat_widgets/chat_scrollbar.dart';
+import 'package:flutter/animation.dart' show Curve, Curves;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
@@ -23,7 +25,11 @@ class ChatMessageParentData extends ParentData {
   int id = 0;
   double offset = 0.0;
   bool startsDay = false;
-  int? dayBucket;
+
+  /// Group key (`DateTime`, record, string, anything equatable) — produced by
+  /// the viewport's `groupBy` callback. `null` when the message has not loaded
+  /// or grouping is disabled.
+  Object? dayBucket;
 
   /// Fade opacity (0..1) for this message's inline date separator — set by
   /// `RenderChatScrollView` from [offset] so the separator fades out as it
@@ -58,24 +64,26 @@ abstract interface class ChatChildManager {
 /// a global content height. Scrolling repositions children and calls
 /// [markNeedsPaint] (no layout, no rebuild — Tier 1); the framework moves the
 /// cached child layers.
-class RenderChatScrollView extends RenderBox {
+class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   RenderChatScrollView({
     required ChatDataSource dataSource,
     required ChatScrollController controller,
     required double cacheExtent,
     double extraBuildExtent = 0.0,
     bool ticking = true,
+    bool reverse = false,
     ValueListenable<double>? bottomPadding,
     ValueListenable<double>? topPadding,
-    int Function(IChatMessage)? dayBucketOf,
+    Object Function(IChatMessage)? groupBy,
   }) : _dataSource = dataSource,
        _controller = controller,
        _cacheExtent = cacheExtent,
        _extraBuildExtent = extraBuildExtent,
        _ticking = ticking,
+       _reverse = reverse,
        _bottomPadding = bottomPadding,
        _topPadding = topPadding,
-       _dayBucketOf = dayBucketOf;
+       _groupBy = groupBy;
 
   /// Set by `ChatScrollElement` in `mount`. Drives lazy child inflation.
   ChatChildManager? childManager;
@@ -88,29 +96,40 @@ class RenderChatScrollView extends RenderBox {
   ChatDataSource _dataSource;
   set dataSource(ChatDataSource value) {
     if (identical(_dataSource, value)) return;
-    if (attached) _dataSource.removeDataListener(_onDataChanged);
+    if (attached) {
+      _dataSource
+        ..removeDataListener(_onDataChanged)
+        ..removeBoundaryListener(_onBoundaryChanged);
+    }
     // The old data source's in-flight fetch (and any pending retry) refers to
     // chunks we no longer read — let it stop instead of resolving into an
     // orphan, and avoid a dangling Timer on detach.
     _dataSource.cancelFetch();
     _dataSource = value;
-    if (attached) _dataSource.addDataListener(_onDataChanged);
+    if (attached) {
+      _dataSource
+        ..addDataListener(_onDataChanged)
+        ..addBoundaryListener(_onBoundaryChanged);
+    }
     markNeedsLayout();
+    markNeedsSemanticsUpdate();
   }
 
   ChatScrollController _controller;
   set controller(ChatScrollController value) {
     if (identical(_controller, value)) return;
     if (attached) {
+      _cancelAnimate(notify: false);
       _controller
         ..removeJumpListener(_onJump)
-        ..removeBoundaryListener(_onBoundaryChanged);
+        ..animator = null;
+      _controller.visibleRange = null;
     }
     _controller = value;
     if (attached) {
       _controller
         ..addJumpListener(_onJump)
-        ..addBoundaryListener(_onBoundaryChanged);
+        ..animator = this;
     }
     markNeedsLayout();
   }
@@ -140,6 +159,18 @@ class RenderChatScrollView extends RenderBox {
     _ticking = value;
     _ticker?.muted = !value;
     if (!value) _cancelFling();
+  }
+
+  /// Whether to prefer pinning the *newest* message to the bottom edge when
+  /// the conversation is short enough to fit in the viewport (`reverse:
+  /// true`, chat-style). The default `false` is list-style: short content
+  /// stacks at the top.
+  bool _reverse;
+  set reverse(bool value) {
+    if (_reverse == value) return;
+    _reverse = value;
+    markNeedsLayout();
+    markNeedsSemanticsUpdate();
   }
 
   /// Empty space reserved after the newest message — compensation for bottom
@@ -179,16 +210,16 @@ class RenderChatScrollView extends RenderBox {
 
   double get _topPad => _topPadding?.value ?? 0.0;
 
-  /// Groups messages into days for the date separators / floating header.
-  /// `null` turns the day-separator feature off entirely.
-  int Function(IChatMessage)? _dayBucketOf;
-  set dayBucketOf(int Function(IChatMessage)? value) {
+  /// Groups messages into sections for the date separators / floating header.
+  /// `null` turns the feature off entirely.
+  Object Function(IChatMessage)? _groupBy;
+  set groupBy(Object Function(IChatMessage)? value) {
     // `==` instead of `identical`: an instance-method tear-off
     // (`widget.someMethod`) is not necessarily identical across accesses but
     // *is* equal — so `identical` would force a relayout every parent rebuild
     // while `==` correctly recognises the unchanged callback.
-    if (_dayBucketOf == value) return;
-    _dayBucketOf = value;
+    if (_groupBy == value) return;
+    _groupBy = value;
     markNeedsLayout();
   }
 
@@ -227,6 +258,33 @@ class RenderChatScrollView extends RenderBox {
 
   VerticalDragGestureRecognizer? _drag;
 
+  // --- animateTo state ------------------------------------------------------
+
+  /// Active `animateTo`'s completer, or `null` when no animation is running.
+  Completer<void>? _animateCompleter;
+
+  /// Target id for the in-flight animation; for the close-target branch the
+  /// anchor has already been reassigned to this id at the start.
+  int _animateTargetId = 0;
+
+  /// Anchor pixel offset at animation start (close path) or the fade window
+  /// progress driver (far path).
+  double _animateStartOffset = 0.0;
+  double _animateEndOffset = 0.0;
+  Duration? _animateStartTime;
+  Duration _animateDuration = Duration.zero;
+  Curve _animateCurve = Curves.linear;
+
+  /// `true` while the far-target crossfade is active. Drives [paint]'s
+  /// opacity wrap and the jumpTo at the fade midpoint.
+  bool _farAnimateActive = false;
+  bool _farAnimateJumped = false;
+
+  /// Current fade opacity for far-target crossfade (1.0 → 0.0 → 1.0 across
+  /// the animation duration). 1.0 when no far animation is in flight.
+  double _fadeOpacity = 1.0;
+  final LayerHandle<OpacityLayer> _fadeLayer = LayerHandle<OpacityLayer>();
+
   // --- Fetch poll ------------------------------------------------------------
 
   static const Duration _pollInterval = Duration(milliseconds: 150);
@@ -254,9 +312,9 @@ class RenderChatScrollView extends RenderBox {
     if (value != null) adoptChild(value);
   }
 
-  /// Day bucket the floating header was last built for; `null` = none. The
-  /// header is rebuilt only when the topmost visible day leaves this bucket.
-  int? _headerBucket;
+  /// Group bucket the floating header was last built for; `null` = none.
+  /// The header is rebuilt only when the topmost visible group changes.
+  Object? _headerBucket;
 
   /// Date the header currently shows — for debugging / introspection.
   DateTime? _headerDate;
@@ -350,10 +408,12 @@ class RenderChatScrollView extends RenderBox {
     }
     _floatingHeader?.attach(owner);
     _ticker = Ticker(_onTick)..muted = !_ticking;
-    _dataSource.addDataListener(_onDataChanged);
+    _dataSource
+      ..addDataListener(_onDataChanged)
+      ..addBoundaryListener(_onBoundaryChanged);
     _controller
       ..addJumpListener(_onJump)
-      ..addBoundaryListener(_onBoundaryChanged);
+      ..animator = this;
     _bottomPadding?.addListener(_onBottomPaddingChanged);
     _topPadding?.addListener(_onTopPaddingChanged);
     _drag = VerticalDragGestureRecognizer()
@@ -371,11 +431,14 @@ class RenderChatScrollView extends RenderBox {
     _pollTimer = null;
     // Drop our listener first — cancelFetch notifies, and a `markNeedsLayout`
     // on a detaching render object is brittle even if currently harmless.
-    _dataSource.removeDataListener(_onDataChanged);
+    _dataSource
+      ..removeDataListener(_onDataChanged)
+      ..removeBoundaryListener(_onBoundaryChanged);
     _dataSource.cancelFetch();
     _controller
       ..removeJumpListener(_onJump)
-      ..removeBoundaryListener(_onBoundaryChanged);
+      ..animator = null;
+    _cancelAnimate(notify: false);
     _bottomPadding?.removeListener(_onBottomPaddingChanged);
     _topPadding?.removeListener(_onTopPaddingChanged);
     _drag?.dispose();
@@ -465,7 +528,7 @@ class RenderChatScrollView extends RenderBox {
     // When the bottom inset changed while the viewport was pinned at the
     // newest message, let the clamp carry the content along with the inset.
     final repinBottom =
-        _bottomPaddingDirty && _controller.reachedNewest && !_canRevealNewer;
+        _bottomPaddingDirty && _dataSource.reachedNewest && !_canRevealNewer;
     _bottomPaddingDirty = false;
     final clamped = _clampBoundaries(repinBottom: repinBottom);
     if (clamped) _cancelFling();
@@ -500,6 +563,7 @@ class RenderChatScrollView extends RenderBox {
     }
     _evictChunks();
     _updateScrollSemantics();
+    _publishVisibleRange();
     _scheduleFetchPoll();
     _updateFloatingHeader();
 
@@ -520,8 +584,8 @@ class RenderChatScrollView extends RenderBox {
 
   void _fanOutFromAnchor(BoxConstraints cc, Set<int> built) {
     final anchorId = _controller.anchorMessageId;
-    final oldest = _controller.oldestKnownId;
-    final newest = _controller.newestKnownId;
+    final oldest = _dataSource.oldestKnownId;
+    final newest = _dataSource.newestKnownId;
 
     // Build zone = cacheExtent + keep-alive band, plus a directional lead
     // biased toward travel so a fast fling does not outrun the built range.
@@ -579,22 +643,22 @@ class RenderChatScrollView extends RenderBox {
     return child;
   }
 
-  /// Day-grouping key for [id], or `null` when its message is not loaded (or
-  /// day separators are disabled).
-  int? _bucketOf(int id) {
-    final bucketOf = _dayBucketOf;
-    if (bucketOf == null) return null;
+  /// Group key for [id], or `null` when its message is not loaded (or
+  /// grouping is disabled).
+  Object? _bucketOf(int id) {
+    final groupBy = _groupBy;
+    if (groupBy == null) return null;
     final message = _dataSource.getMessage(id);
-    return message == null ? null : bucketOf(message);
+    return message == null ? null : groupBy(message);
   }
 
-  /// Whether message [id] is the first of its day — and so carries an inline
-  /// date separator. Needs [id] and its predecessor loaded; until then returns
-  /// `false`, so the separator appears once the data arrives.
-  bool _startsDay(int id, int? bucket) {
+  /// Whether message [id] is the first of its group — and so carries an
+  /// inline date separator. Needs [id] and its predecessor loaded; until then
+  /// returns `false`, so the separator appears once the data arrives.
+  bool _startsDay(int id, Object? bucket) {
     if (bucket == null) return false;
-    final oldest = _controller.oldestKnownId;
-    if (_controller.reachedOldest && oldest != null && id <= oldest) {
+    final oldest = _dataSource.oldestKnownId;
+    if (_dataSource.reachedOldest && oldest != null && id <= oldest) {
       return true; // the very first message of the conversation
     }
     final prevBucket = _bucketOf(id - 1);
@@ -633,38 +697,52 @@ class RenderChatScrollView extends RenderBox {
   /// [repinBottom] also pulls the newest message *up* onto the bottom edge —
   /// used when the reserved bottom inset grew while the viewport was pinned
   /// there, so the message follows the inset instead of being covered.
+  ///
+  /// The two pins (newest-to-bottom, oldest-to-top) compete when the entire
+  /// conversation fits in the viewport — whichever runs last "wins". In
+  /// `reverse: false` (list-style) the oldest-pin runs last so short content
+  /// stacks at the top; in `reverse: true` (chat-style) the newest-pin runs
+  /// last so short content stacks at the bottom.
   bool _clampBoundaries({bool repinBottom = false}) {
     var cancelFling = false;
-
-    final newest = _controller.newestKnownId;
-    if (_controller.reachedNewest && newest != null) {
+    bool pinNewest() {
+      final newest = _dataSource.newestKnownId;
+      if (!_dataSource.reachedNewest || newest == null) return false;
       final last = _children[newest];
-      if (last != null) {
-        final bottom = _parentData(last).offset + last.size.height;
-        // Pin the newest message above the reserved bottom inset (composer,
-        // attachment previews, …) instead of against the viewport edge.
-        final bottomEdge = size.height - _bottomPad;
-        if (bottom < bottomEdge || (repinBottom && bottom > bottomEdge)) {
-          _controller.applyScrollDelta(bottomEdge - bottom);
-          _repositionFromAnchor();
-          cancelFling = true;
-        }
+      if (last == null) return false;
+      final bottom = _parentData(last).offset + last.size.height;
+      // Pin the newest message above the reserved bottom inset (composer,
+      // attachment previews, …) instead of against the viewport edge.
+      final bottomEdge = size.height - _bottomPad;
+      if (bottom < bottomEdge || (repinBottom && bottom > bottomEdge)) {
+        _controller.applyScrollDelta(bottomEdge - bottom);
+        _repositionFromAnchor();
+        return true;
       }
+      return false;
     }
 
-    final oldest = _controller.oldestKnownId;
-    if (_controller.reachedOldest && oldest != null) {
+    bool pinOldest() {
+      final oldest = _dataSource.oldestKnownId;
+      if (!_dataSource.reachedOldest || oldest == null) return false;
       final first = _children[oldest];
-      if (first != null) {
-        final topY = _parentData(first).offset;
-        if (topY > 0) {
-          _controller.applyScrollDelta(-topY);
-          _repositionFromAnchor();
-          cancelFling = true;
-        }
+      if (first == null) return false;
+      final topY = _parentData(first).offset;
+      if (topY > 0) {
+        _controller.applyScrollDelta(-topY);
+        _repositionFromAnchor();
+        return true;
       }
+      return false;
     }
 
+    if (_reverse) {
+      cancelFling = pinOldest() || cancelFling;
+      cancelFling = pinNewest() || cancelFling;
+    } else {
+      cancelFling = pinNewest() || cancelFling;
+      cancelFling = pinOldest() || cancelFling;
+    }
     return cancelFling;
   }
 
@@ -743,9 +821,9 @@ class RenderChatScrollView extends RenderBox {
     return ((topY - fadeEnd) / _kDividerFadeBand + 1.0).clamp(0.0, 1.0);
   }
 
-  /// The topmost visible day — the bucket + message id of the first child
+  /// The topmost visible group — the bucket + message id of the first child
   /// crossing the top edge. O(visible children) of pure parent-data reads.
-  ({int? bucket, int? id}) _scanTopDay() {
+  ({Object? bucket, int? id}) _scanTopDay() {
     final topEdge = _topPad;
     final viewportHeight = size.height;
     for (final entry in _children.entries) {
@@ -758,13 +836,13 @@ class RenderChatScrollView extends RenderBox {
     return (bucket: null, id: null);
   }
 
-  /// Rebuild (only on a day change), lay out, and pin the floating header.
+  /// Rebuild (only on a group change), lay out, and pin the floating header.
   /// Called from [performLayout].
   void _updateFloatingHeader() {
     final scan = _scanTopDay();
-    final targetBucket = _dayBucketOf == null ? null : scan.bucket;
+    final targetBucket = _groupBy == null ? null : scan.bucket;
 
-    // Rebuild the header widget only when the day it shows changes (or its
+    // Rebuild the header widget only when the group it shows changes (or its
     // builder changed). Building during layout is legal inside a callback.
     if (targetBucket != _headerBucket || _headerDirty) {
       _headerBucket = targetBucket;
@@ -790,10 +868,10 @@ class RenderChatScrollView extends RenderBox {
   /// During a Tier-1 scroll: re-pin the header and report whether the topmost
   /// day changed — the caller then relayouts to rebuild the header text.
   bool _tickFloatingHeader() {
-    if (_floatingHeader == null && _dayBucketOf == null) return false;
+    if (_floatingHeader == null && _groupBy == null) return false;
     final scan = _scanTopDay();
     _placeFloatingHeader();
-    final targetBucket = _dayBucketOf == null ? null : scan.bucket;
+    final targetBucket = _groupBy == null ? null : scan.bucket;
     return targetBucket != _headerBucket;
   }
 
@@ -833,9 +911,140 @@ class RenderChatScrollView extends RenderBox {
     _lastFlingValue = 0.0;
     _flingStartTime = null;
     _ensureTicker();
+    _controller.notifyScrollEvent(ChatFlingStart(velocity));
   }
 
-  void _cancelFling() => _simulation = null;
+  void _cancelFling() {
+    final wasFlinging = _simulation != null;
+    _simulation = null;
+    if (wasFlinging) _controller.notifyScrollEvent(const ChatFlingEnd());
+  }
+
+  // --- animateTo ------------------------------------------------------------
+
+  /// Maximum distance (px) for which the close-path animation is used. Beyond
+  /// this the viewport falls back to the far-path: crossfade + jumpTo.
+  static const double _kCloseAnimateDistance = 2400.0;
+
+  @override
+  Future<void> animate(
+    int targetId, {
+    required Duration duration,
+    required Curve curve,
+  }) {
+    // Re-entrant animateTo: cancel the in-flight one, schedule the new one.
+    _cancelAnimate(notify: true);
+    if (duration <= Duration.zero) {
+      _controller.jumpTo(targetId);
+      return Future<void>.value();
+    }
+
+    final completer = Completer<void>();
+    _animateCompleter = completer;
+    _animateTargetId = targetId;
+    _animateDuration = duration;
+    _animateCurve = curve;
+    _animateStartTime = null;
+
+    final offsetToTarget = _offsetToBuiltMessage(targetId);
+    if (offsetToTarget != null &&
+        offsetToTarget.abs() <= _kCloseAnimateDistance) {
+      // Close path: re-base the anchor onto the target with its current
+      // offset, then animate that offset toward 0 ("scroll the target to the
+      // top edge").
+      _controller.reassignAnchor(targetId, offsetToTarget);
+      _animateStartOffset = offsetToTarget;
+      _animateEndOffset = 0.0;
+      _farAnimateActive = false;
+      _farAnimateJumped = false;
+      _fadeOpacity = 1.0;
+    } else {
+      // Far path: a crossfade — fade out, jumpTo at the midpoint, fade back.
+      _farAnimateActive = true;
+      _farAnimateJumped = false;
+      _animateStartOffset = 1.0;
+      _animateEndOffset = 0.0;
+      _fadeOpacity = 1.0;
+    }
+    _cancelFling();
+    _ensureTicker();
+    return completer.future;
+  }
+
+  /// Anchor-relative Y offset of message [id] in the currently-laid-out
+  /// children, or `null` if [id] is not in `_children`.
+  double? _offsetToBuiltMessage(int id) {
+    final child = _children[id];
+    if (child == null) return null;
+    return _parentData(child).offset;
+  }
+
+  void _cancelAnimate({required bool notify}) {
+    final completer = _animateCompleter;
+    if (completer == null) return;
+    _animateCompleter = null;
+    _animateStartTime = null;
+    _farAnimateActive = false;
+    _farAnimateJumped = false;
+    if (_fadeOpacity != 1.0) {
+      _fadeOpacity = 1.0;
+      _fadeLayer.layer = null;
+      markNeedsPaint();
+    }
+    if (!completer.isCompleted) completer.complete();
+    if (notify) {
+      _controller.notifyScrollEvent(ChatAnimateEnd(_animateTargetId));
+    }
+  }
+
+  /// Drive the in-flight animation by one tick. Returns the additional scroll
+  /// delta to apply (for the close path); the far path mutates fade opacity
+  /// in-place and returns 0.
+  double _tickAnimate(Duration elapsed) {
+    if (_animateCompleter == null) return 0.0;
+    final start = _animateStartTime ??= elapsed;
+    final totalUs = _animateDuration.inMicroseconds;
+    final elapsedUs = (elapsed - start).inMicroseconds;
+    final t = totalUs <= 0 ? 1.0 : (elapsedUs / totalUs).clamp(0.0, 1.0);
+
+    if (_farAnimateActive) {
+      // 0 → 0.5 → 1: opacity 1 → 0 → 1. Mid-point performs the jumpTo.
+      final eased = _animateCurve.transform(t);
+      if (t < 0.5) {
+        _fadeOpacity = 1.0 - eased * 2.0;
+      } else {
+        if (!_farAnimateJumped) {
+          _farAnimateJumped = true;
+          _controller.jumpTo(_animateTargetId);
+        }
+        _fadeOpacity = (eased * 2.0 - 1.0).clamp(0.0, 1.0);
+      }
+      if (t >= 1.0) {
+        _fadeOpacity = 1.0;
+        _completeAnimate();
+      } else {
+        markNeedsPaint();
+      }
+      return 0.0;
+    }
+
+    // Close path: interpolate anchor offset linearly along the curve.
+    final eased = _animateCurve.transform(t);
+    final target =
+        _animateStartOffset + (_animateEndOffset - _animateStartOffset) * eased;
+    final delta = target - _controller.anchorPixelOffset;
+    if (t >= 1.0) _completeAnimate();
+    return delta;
+  }
+
+  void _completeAnimate() {
+    final completer = _animateCompleter;
+    _animateCompleter = null;
+    _animateStartTime = null;
+    _farAnimateActive = false;
+    _farAnimateJumped = false;
+    if (completer != null && !completer.isCompleted) completer.complete();
+  }
 
   /// Ticker callback — the entire scroll path. Bypasses layout: repositions
   /// children and calls [markNeedsPaint] (Tier 1). Falls back to
@@ -859,6 +1068,11 @@ class RenderChatScrollView extends RenderBox {
       }
     }
 
+    // animateTo drives the same Ticker — the close path contributes a delta
+    // to the anchor offset, the far path mutates fade opacity and triggers
+    // jumpTo on its own.
+    delta += _tickAnimate(elapsed);
+
     if (delta != 0.0) _controller.applyScrollDelta(delta);
     // Smooth the per-frame scroll delta; biases the next fan-out lead.
     _scrollVelocity = _scrollVelocity * 0.7 + delta * 0.3;
@@ -866,8 +1080,12 @@ class RenderChatScrollView extends RenderBox {
     // Keep the anchor on a visible message so the next layout fans out a
     // tight range rather than rebuilding everything back to a drifted anchor.
     _renormalizeAnchor();
-    if (_clampBoundaries()) _cancelFling();
+    if (_clampBoundaries()) {
+      _cancelFling();
+      _cancelAnimate(notify: true);
+    }
     _updateScrollSemantics();
+    _publishVisibleRange();
     // Reposition the header (Tier-1); a day crossing needs a relayout to
     // rebuild its text.
     final headerDayChanged = _tickFloatingHeader();
@@ -878,7 +1096,7 @@ class RenderChatScrollView extends RenderBox {
       markNeedsPaint();
     }
 
-    if (_simulation == null) _stopTickerIfIdle();
+    if (_simulation == null && _animateCompleter == null) _stopTickerIfIdle();
   }
 
   /// Whether the built child range no longer covers viewport + cache extent.
@@ -894,11 +1112,11 @@ class RenderChatScrollView extends RenderBox {
     if (top > size.height || bottom < 0) return true;
 
     if (bottom < size.height + _cacheExtent) {
-      final newest = _controller.newestKnownId;
+      final newest = _dataSource.newestKnownId;
       if (newest == null || lastId < newest) return true;
     }
     if (top > -_cacheExtent) {
-      final oldest = _controller.oldestKnownId;
+      final oldest = _dataSource.oldestKnownId;
       if (oldest == null || firstId > oldest) return true;
     }
     return false;
@@ -961,7 +1179,9 @@ class RenderChatScrollView extends RenderBox {
 
   void _onDragStart(DragStartDetails details) {
     _cancelFling();
+    _cancelAnimate(notify: true);
     _ensureTicker();
+    _controller.notifyScrollEvent(const ChatUserDragStart());
   }
 
   void _onDragUpdate(DragUpdateDetails details) {
@@ -971,8 +1191,9 @@ class RenderChatScrollView extends RenderBox {
   }
 
   void _onDragEnd(DragEndDetails details) {
-    final velocity = details.primaryVelocity;
-    if (velocity != null && velocity.abs() >= 50.0) {
+    final velocity = details.primaryVelocity ?? 0.0;
+    _controller.notifyScrollEvent(ChatUserDragEnd(velocity));
+    if (velocity.abs() >= 50.0) {
       _startFling(velocity);
     } else {
       _stopTickerIfIdle();
@@ -1000,7 +1221,7 @@ class RenderChatScrollView extends RenderBox {
     }
 
     if (event is PointerDownEvent) {
-      if (_controller.newestKnownId != null &&
+      if (_dataSource.newestKnownId != null &&
           _scrollbar.tryStartDrag(event, size)) {
         _cancelFling();
         markNeedsPaint();
@@ -1054,9 +1275,60 @@ class RenderChatScrollView extends RenderBox {
       ..isSemanticBoundary = true
       ..explicitChildNodes = true
       ..hasImplicitScrolling = true;
-    // scrollUp moves content up -> reveals newer; scrollDown reveals older.
-    if (_canRevealNewer) config.onScrollUp = _semanticRevealNewer;
-    if (_canRevealOlder) config.onScrollDown = _semanticRevealOlder;
+    // `scrollUp` semantically means "scroll the container up" — i.e. expose
+    // content currently below the viewport. In a chat (`reverse: true`)
+    // assistive-tech users typically think of "scroll up" as "look at older
+    // history" — older is *above*, so we flip the mapping there.
+    if (_reverse) {
+      if (_canRevealOlder) config.onScrollUp = _semanticRevealOlder;
+      if (_canRevealNewer) config.onScrollDown = _semanticRevealNewer;
+    } else {
+      if (_canRevealNewer) config.onScrollUp = _semanticRevealNewer;
+      if (_canRevealOlder) config.onScrollDown = _semanticRevealOlder;
+    }
+  }
+
+  // --- Visible range publishing --------------------------------------------
+
+  /// Push the current first/last on-screen ids + anchor id to the controller's
+  /// `visibleRange` listenable. Called after every layout and Tier-1 tick —
+  /// O(visible children) of pure parent-data reads.
+  void _publishVisibleRange() {
+    if (_children.isEmpty) {
+      _controller.visibleRange = null;
+      return;
+    }
+    final topEdge = _topPad;
+    final bottomEdge = size.height - _bottomPad;
+    int? firstId;
+    int? lastId;
+    for (final entry in _children.entries) {
+      final child = entry.value;
+      final pd = _parentData(child);
+      final childTop = pd.offset;
+      final childBottom = childTop + child.size.height;
+      if (childBottom <= topEdge) continue;
+      if (childTop >= bottomEdge) break;
+      firstId ??= entry.key;
+      lastId = entry.key;
+    }
+    if (firstId == null || lastId == null) {
+      _controller.visibleRange = null;
+      return;
+    }
+    final current = _controller.visibleRange.value;
+    final anchorId = _controller.anchorMessageId;
+    if (current != null &&
+        current.firstId == firstId &&
+        current.lastId == lastId &&
+        current.anchorId == anchorId) {
+      return;
+    }
+    _controller.visibleRange = (
+      firstId: firstId,
+      lastId: lastId,
+      anchorId: anchorId,
+    );
   }
 
   // Note: `visitChildrenForSemantics` is intentionally NOT overridden to filter
@@ -1090,8 +1362,8 @@ class RenderChatScrollView extends RenderBox {
 
   bool _computeCanRevealOlder() {
     if (_children.isEmpty) return false;
-    final oldest = _controller.oldestKnownId;
-    if (oldest != null && _controller.reachedOldest) {
+    final oldest = _dataSource.oldestKnownId;
+    if (oldest != null && _dataSource.reachedOldest) {
       final first = _children[oldest];
       if (first != null && _parentData(first).offset >= -0.5) return false;
     }
@@ -1100,8 +1372,8 @@ class RenderChatScrollView extends RenderBox {
 
   bool _computeCanRevealNewer() {
     if (_children.isEmpty) return false;
-    final newest = _controller.newestKnownId;
-    if (newest != null && _controller.reachedNewest) {
+    final newest = _dataSource.newestKnownId;
+    if (newest != null && _dataSource.reachedNewest) {
       final last = _children[newest];
       if (last != null &&
           _parentData(last).offset + last.size.height <=
@@ -1116,8 +1388,8 @@ class RenderChatScrollView extends RenderBox {
 
   /// Map a 0..1 scrollbar [progress] to a message id and teleport there.
   void _jumpToScrollbar(double progress) {
-    final newest = _controller.newestKnownId;
-    final oldest = _controller.oldestKnownId;
+    final newest = _dataSource.newestKnownId;
+    final oldest = _dataSource.oldestKnownId;
     if (newest == null || oldest == null || newest <= oldest) return;
     final targetId = (oldest + progress * (newest - oldest)).round();
     if (targetId != _controller.anchorMessageId) {
@@ -1128,8 +1400,8 @@ class RenderChatScrollView extends RenderBox {
   /// Scrollbar thumb progress (0..1) derived from the anchor — pure id math,
   /// no dependency on a global content height. Returns `null` when hidden.
   double? _scrollbarProgress() {
-    final newest = _controller.newestKnownId;
-    final oldest = _controller.oldestKnownId;
+    final newest = _dataSource.newestKnownId;
+    final oldest = _dataSource.oldestKnownId;
     if (newest == null || oldest == null) return null;
     final range = newest - oldest;
     if (range <= 0) return null;
@@ -1162,7 +1434,7 @@ class RenderChatScrollView extends RenderBox {
       needsCompositing,
       offset,
       Offset.zero & size,
-      _paintContents,
+      _paintWithFade,
       oldLayer: _clipLayer.layer,
     );
 
@@ -1172,6 +1444,27 @@ class RenderChatScrollView extends RenderBox {
       debugPaintFrameId++;
       return true;
     }());
+  }
+
+  /// Wraps [_paintContents] in an [OpacityLayer] while a far-target
+  /// `animateTo` crossfade is in flight. Otherwise paints straight through.
+  void _paintWithFade(PaintingContext context, Offset offset) {
+    if (_fadeOpacity >= 0.999) {
+      _fadeLayer.layer = null;
+      _paintContents(context, offset);
+      return;
+    }
+    if (_fadeOpacity <= 0.001) {
+      // Fully invisible — skip the children entirely. Cheap mid-crossfade.
+      _fadeLayer.layer = null;
+      return;
+    }
+    _fadeLayer.layer = context.pushOpacity(
+      offset,
+      (_fadeOpacity * 255).round().clamp(0, 255),
+      (innerContext, innerOffset) => _paintContents(innerContext, innerOffset),
+      oldLayer: _fadeLayer.layer,
+    );
   }
 
   void _paintContents(PaintingContext context, Offset offset) {
@@ -1205,6 +1498,7 @@ class RenderChatScrollView extends RenderBox {
   @override
   void dispose() {
     _cancelFling();
+    _cancelAnimate(notify: false);
     _ticker?.dispose();
     _ticker = null;
     _pollTimer?.cancel();
@@ -1212,6 +1506,7 @@ class RenderChatScrollView extends RenderBox {
     _drag?.dispose();
     _drag = null;
     _clipLayer.layer = null;
+    _fadeLayer.layer = null;
     super.dispose();
   }
 }

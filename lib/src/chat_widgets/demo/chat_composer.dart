@@ -133,8 +133,8 @@ class _ChatComposerState extends State<ChatComposer>
   // --- Selection actions -----------------------------------------------------
 
   static String? _contentOf(IChatMessage? message) => switch (message) {
-    ChatMessage$User(:final content) => content,
-    ChatMessage$System(:final content) => content,
+    UserChatMessage(:final content) => content,
+    SystemChatMessage(:final content) => content,
     _ => null,
   };
 

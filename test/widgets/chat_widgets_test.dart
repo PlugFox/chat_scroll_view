@@ -2,6 +2,7 @@ import 'package:chatscrollview/src/chat_message.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_data_source.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_common.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_controller.dart';
+import 'package:chatscrollview/src/chat_scroll/chat_scroll_events.dart';
 import 'package:chatscrollview/src/chat_widgets/chat_scroll_view.dart';
 import 'package:chatscrollview/src/chat_widgets/render_chat_scroll_view.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
@@ -13,66 +14,85 @@ import 'package:flutter_test/flutter_test.dart';
 // Test data sources
 // ---------------------------------------------------------------------------
 
-/// All messages preloaded; [fetch] is a no-op.
-class _PreloadedDataSource extends ChatDataSource {
-  _PreloadedDataSource(List<IChatMessage> messages) {
+/// Mixin: seed `[0, count-1]` boundaries at construction.
+mixin _BoundedSource on ChatDataSource {
+  int get count;
+  void _seed() => seedBoundaries(
+    oldestKnownId: 0,
+    newestKnownId: count - 1,
+    reachedOldest: true,
+    reachedNewest: true,
+  );
+}
+
+/// All messages preloaded; [fetchRange] is a no-op (range never needs fetch).
+class _PreloadedDataSource extends ChatDataSource with _BoundedSource {
+  _PreloadedDataSource(List<IChatMessage> messages) : count = messages.length {
     upsertMessages(messages);
+    _seed();
   }
 
   @override
-  Future<List<IChatMessage>> fetch({
-    int? from,
-    int? to,
-    DateTime? after,
-  }) async => const <IChatMessage>[];
-}
-
-/// Empty until [fetch] resolves (after a delay) — exercises the shimmer path.
-class _AsyncDataSource extends ChatDataSource {
-  _AsyncDataSource(this.count);
-
   final int count;
 
   @override
-  Future<List<IChatMessage>> fetch({
-    int? from,
-    int? to,
-    DateTime? after,
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
+  }) async => const <IChatMessage>[];
+}
+
+/// Empty until [fetchRange] resolves (after a delay) — exercises the
+/// shimmer path.
+class _AsyncDataSource extends ChatDataSource with _BoundedSource {
+  _AsyncDataSource(this.count) {
+    _seed();
+  }
+
+  @override
+  final int count;
+
+  @override
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
   }) async {
     await Future<void>.delayed(const Duration(milliseconds: 100));
-    final lo = (from ?? 0).clamp(0, count - 1);
-    final hi = (to ?? count - 1).clamp(0, count - 1);
+    final lo = fromId.clamp(0, count - 1);
+    final hi = toId.clamp(0, count - 1);
     return <IChatMessage>[for (var i = lo; i <= hi; i++) _msg(i)];
   }
 }
 
 /// Fails the first [failuresBeforeSuccess] fetches, then resolves normally.
 /// Exercises the error → retry path.
-class _FlakyDataSource extends ChatDataSource {
-  _FlakyDataSource(this.count, {required this.failuresBeforeSuccess});
+class _FlakyDataSource extends ChatDataSource with _BoundedSource {
+  _FlakyDataSource(this.count, {required this.failuresBeforeSuccess}) {
+    _seed();
+  }
 
+  @override
   final int count;
   final int failuresBeforeSuccess;
   int _attempts = 0;
 
   @override
-  Future<List<IChatMessage>> fetch({
-    int? from,
-    int? to,
-    DateTime? after,
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
   }) async {
     await Future<void>.delayed(const Duration(milliseconds: 30));
     final attempt = _attempts++;
     if (attempt < failuresBeforeSuccess) {
       throw StateError('flaky failure #$attempt');
     }
-    final lo = (from ?? 0).clamp(0, count - 1);
-    final hi = (to ?? count - 1).clamp(0, count - 1);
+    final lo = fromId.clamp(0, count - 1);
+    final hi = toId.clamp(0, count - 1);
     return <IChatMessage>[for (var i = lo; i <= hi; i++) _msg(i)];
   }
 }
 
-IChatMessage _msg(int i) => ChatMessage$User(
+IChatMessage _msg(int i) => UserChatMessage(
   id: i,
   sender: 'User',
   createdAt: DateTime(2026),
@@ -83,12 +103,6 @@ IChatMessage _msg(int i) => ChatMessage$User(
 List<IChatMessage> _generate(int n) => <IChatMessage>[
   for (var i = 0; i < n; i++) _msg(i),
 ];
-
-ChatScrollController _boundedController(int count) => ChatScrollController()
-  ..oldestKnownId = 0
-  ..newestKnownId = count - 1
-  ..reachedOldest = true
-  ..reachedNewest = true;
 
 Widget _harness({
   required ChatDataSource dataSource,
@@ -131,7 +145,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -153,7 +167,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -183,7 +197,7 @@ void main() {
 
     testWidgets('drag gesture scrolls the viewport', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -205,7 +219,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -237,7 +251,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count ~/ 2);
+      final controller = ChatScrollController()..jumpTo(count ~/ 2);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -273,7 +287,7 @@ void main() {
       tester,
     ) async {
       const count = 1000;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -297,7 +311,7 @@ void main() {
 
     testWidgets('jumpTo teleports to an arbitrary message', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -317,7 +331,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(dataSource: _AsyncDataSource(count), controller: controller),
       );
@@ -338,7 +352,7 @@ void main() {
     testWidgets('evicts data chunks beyond maxChunks', (tester) async {
       const count = 4000; // ~63 chunks of 64 messages
       final ds = _PreloadedDataSource(_generate(count));
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(dataSource: ds, controller: controller),
       );
@@ -361,7 +375,7 @@ void main() {
     ) async {
       final handle = tester.ensureSemantics();
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -392,7 +406,7 @@ void main() {
     testWidgets('extraBuildExtent keeps extra children mounted', (tester) async {
       const count = 256;
 
-      final base = _boundedController(count)..jumpTo(count ~/ 2);
+      final base = ChatScrollController()..jumpTo(count ~/ 2);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -403,7 +417,7 @@ void main() {
       await tester.pumpAndSettle();
       final withoutExtra = _render(tester).debugChildCount;
 
-      final kept = _boundedController(count)..jumpTo(count ~/ 2);
+      final kept = ChatScrollController()..jumpTo(count ~/ 2);
       await tester.pumpWidget(
         _harness(
           dataSource: _PreloadedDataSource(_generate(count)),
@@ -422,7 +436,7 @@ void main() {
       tester,
     ) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final inset = ValueNotifier<double>(150);
       addTearDown(inset.dispose);
       await tester.pumpWidget(
@@ -452,7 +466,7 @@ void main() {
 
     testWidgets('topPadding leaves room for an overlay header', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(8);
+      final controller = ChatScrollController()..jumpTo(8);
       final inset = ValueNotifier<double>(0);
       addTearDown(inset.dispose);
       await tester.pumpWidget(
@@ -495,7 +509,7 @@ void main() {
     testWidgets('swapping bottomPadding to a listenable with a larger value '
         'follows the new inset', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final firstInset = ValueNotifier<double>(50);
       final secondInset = ValueNotifier<double>(200);
       addTearDown(firstInset.dispose);
@@ -528,7 +542,7 @@ void main() {
     testWidgets('messageBuilder swap re-inflates messages with the new '
         'output', (tester) async {
       const count = 256;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final dataSource = _PreloadedDataSource(_generate(count));
 
       Widget build(String prefix) => MaterialApp(
@@ -563,7 +577,7 @@ void main() {
     testWidgets('swapping the data source cancels in-flight fetches on the '
         'old one', (tester) async {
       const count = 64;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final first = _AsyncDataSource(count);
       final second = _PreloadedDataSource(_generate(count));
 
@@ -597,7 +611,7 @@ void main() {
 
     testWidgets('detaching cancels the in-flight fetch', (tester) async {
       const count = 64;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final source = _AsyncDataSource(count);
       // Dispose drains pending timers in the source's `Future.delayed`.
       addTearDown(source.dispose);
@@ -629,7 +643,7 @@ void main() {
       tester,
     ) async {
       const count = 64;
-      final controller = _boundedController(count)..jumpTo(count - 1);
+      final controller = ChatScrollController()..jumpTo(count - 1);
       final source = _FlakyDataSource(count, failuresBeforeSuccess: 1);
 
       await tester.pumpWidget(
@@ -654,6 +668,209 @@ void main() {
         source.chunks.values.any((c) => c.status.isError),
         isFalse,
       );
+    });
+  });
+
+  group('ChatScrollController.animateTo', () {
+    testWidgets('animates the anchor onto a nearby target', (tester) async {
+      const count = 256;
+      // Sit mid-conversation so neither boundary-clamp is in play; wide
+      // cache so the target is in the built range (close path).
+      final controller = ChatScrollController()..jumpTo(count ~/ 2);
+      await tester.pumpWidget(
+        _harness(
+          dataSource: _PreloadedDataSource(_generate(count)),
+          controller: controller,
+          cacheExtent: 1000,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(controller.anchorMessageId, count ~/ 2);
+
+      const targetId = 120; // 8 rows × 60 px above the anchor — close path.
+      final future = controller.animateTo(
+        targetId,
+        duration: const Duration(milliseconds: 200),
+      );
+      await tester.pumpAndSettle();
+      await future;
+
+      expect(controller.anchorMessageId, targetId);
+      expect(controller.anchorPixelOffset, closeTo(0, 1));
+    });
+
+    testWidgets('falls back to a crossfade when the target is far off', (
+      tester,
+    ) async {
+      const count = 8000;
+      final controller = ChatScrollController()..jumpTo(count - 1);
+      await tester.pumpWidget(
+        _harness(
+          dataSource: _PreloadedDataSource(_generate(count)),
+          controller: controller,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final future = controller.animateTo(
+        100, // ~ 7700 messages × 60 px ≫ close-path threshold
+        duration: const Duration(milliseconds: 200),
+      );
+      await tester.pumpAndSettle();
+      await future;
+
+      // The crossfade ran (jumpTo at midpoint).
+      expect(controller.anchorMessageId, 100);
+    });
+
+    testWidgets('jumpTo when no viewport is bound to the controller', (
+      tester,
+    ) async {
+      final controller = ChatScrollController();
+      // No render object → animateTo degrades to a synchronous jumpTo and
+      // completes immediately.
+      await controller.animateTo(42);
+      expect(controller.anchorMessageId, 42);
+    });
+  });
+
+  group('ChatScrollView reverse: true', () {
+    testWidgets('short content stacks at the bottom in reverse mode', (
+      tester,
+    ) async {
+      // Only 3 messages — total height 180 px in a 600 px viewport.
+      const count = 3;
+      final controller = ChatScrollController()..jumpTo(count - 1);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 400,
+                height: 600,
+                child: ChatScrollView(
+                  dataSource: _PreloadedDataSource(_generate(count)),
+                  controller: controller,
+                  reverse: true,
+                  messageBuilder: (context, id, message, status) =>
+                      SizedBox(height: 60, child: Text('msg-$id')),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // newest pinned to bottom — its top edge sits at 600 - 60 = 540.
+      expect(
+        tester.getTopLeft(find.text('msg-2')).dy,
+        closeTo(540, 1),
+      );
+      // oldest sits above it, with empty space at the very top.
+      expect(
+        tester.getTopLeft(find.text('msg-0')).dy,
+        closeTo(420, 1),
+      );
+    });
+
+    testWidgets('short content still stacks at the top with default reverse', (
+      tester,
+    ) async {
+      const count = 3;
+      final controller = ChatScrollController()..jumpTo(count - 1);
+      await tester.pumpWidget(
+        _harness(
+          dataSource: _PreloadedDataSource(_generate(count)),
+          controller: controller,
+        ),
+      );
+      await tester.pump();
+
+      // Default (reverse: false): oldest pinned to the top edge.
+      expect(
+        tester.getTopLeft(find.text('msg-0')).dy,
+        closeTo(0, 1),
+      );
+      expect(
+        tester.getTopLeft(find.text('msg-2')).dy,
+        closeTo(120, 1),
+      );
+    });
+  });
+
+  group('ChatScrollController scroll events / visibleRange', () {
+    testWidgets('emits ChatProgrammaticJump on jumpTo', (tester) async {
+      const count = 256;
+      final controller = ChatScrollController()..jumpTo(count - 1);
+      await tester.pumpWidget(
+        _harness(
+          dataSource: _PreloadedDataSource(_generate(count)),
+          controller: controller,
+        ),
+      );
+      await tester.pump();
+
+      final events = <ChatScrollEvent>[];
+      controller.addScrollListener(events.add);
+      controller.jumpTo(50);
+      await tester.pump();
+
+      expect(events, contains(isA<ChatProgrammaticJump>()));
+      final jump = events.whereType<ChatProgrammaticJump>().single;
+      expect(jump.targetId, 50);
+    });
+
+    testWidgets('emits drag / fling lifecycle on user gesture', (tester) async {
+      const count = 256;
+      final controller = ChatScrollController()..jumpTo(count - 1);
+      await tester.pumpWidget(
+        _harness(
+          dataSource: _PreloadedDataSource(_generate(count)),
+          controller: controller,
+        ),
+      );
+      await tester.pump();
+
+      final events = <ChatScrollEvent>[];
+      controller.addScrollListener(events.add);
+
+      await tester.fling(
+        find.byType(ChatScrollView),
+        const Offset(0, 600),
+        4000,
+      );
+      await tester.pumpAndSettle();
+
+      expect(events.whereType<ChatUserDragStart>(), isNotEmpty);
+      expect(events.whereType<ChatUserDragEnd>(), isNotEmpty);
+      expect(events.whereType<ChatFlingStart>(), isNotEmpty);
+      expect(events.whereType<ChatFlingEnd>(), isNotEmpty);
+    });
+
+    testWidgets('visibleRange tracks the on-screen ids', (tester) async {
+      const count = 256;
+      final controller = ChatScrollController()..jumpTo(count - 1);
+      await tester.pumpWidget(
+        _harness(
+          dataSource: _PreloadedDataSource(_generate(count)),
+          controller: controller,
+        ),
+      );
+      await tester.pump();
+
+      final range = controller.visibleRange.value;
+      expect(range, isNotNull);
+      expect(range!.lastId, count - 1);
+      expect(range.anchorId, count - 1);
+      expect(range.firstId, lessThan(range.lastId));
+
+      controller.jumpTo(50);
+      await tester.pump();
+      final next = controller.visibleRange.value;
+      expect(next!.anchorId, 50);
+      expect(next.firstId, lessThanOrEqualTo(50));
+      expect(next.lastId, greaterThanOrEqualTo(50));
     });
   });
 }

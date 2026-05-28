@@ -1,10 +1,38 @@
+import 'dart:async';
+
+import 'package:chatscrollview/src/chat_scroll/chat_scroll_events.dart';
+import 'package:flutter/animation.dart' show Curve, Curves;
 import 'package:flutter/foundation.dart';
+
+/// Visible-range snapshot exposed by [ChatScrollController.visibleRange].
+///
+/// `firstId`/`lastId` are the inclusive id bounds of children whose rect
+/// intersects the viewport's logical paint area (top inset to bottom inset).
+/// `anchorId` is the message id currently used as the layout origin.
+typedef ChatVisibleRange = ({int firstId, int lastId, int anchorId});
+
+/// Delegate that performs actual scroll animations on behalf of
+/// [ChatScrollController.animateTo]. Implemented by `RenderChatScrollView`
+/// and bound automatically when the widget mounts; consumers do not interact
+/// with this directly.
+abstract class ChatScrollAnimator {
+  Future<void> animate(
+    int targetId, {
+    required Duration duration,
+    required Curve curve,
+  });
+}
 
 /// Scroll controller for [ChatScrollView].
 ///
-/// Owns anchor state (navigation) and boundary flags.
-/// Uses typed listeners instead of [ChangeNotifier] —
-/// subscribers know exactly what event occurred.
+/// Owns anchor state and navigation: which message is the layout origin, its
+/// pixel offset, the jump / animate entry points, and the typed event
+/// stream (drag, fling, jump). Conversation boundaries (`oldestKnownId`,
+/// `reachedOldest`, …) live on [ChatDataSource] — they describe the *data*,
+/// not the navigation.
+///
+/// Uses typed listeners instead of [ChangeNotifier] — subscribers know
+/// exactly what event occurred.
 class ChatScrollController {
   // --- Jump: typed listener with payload ---
 
@@ -30,54 +58,83 @@ class ChatScrollController {
     )) {
       cb(messageId);
     }
+    _emitScroll(ChatProgrammaticJump(messageId));
   }
 
-  // --- Boundary: typed listener ---
-
-  final _boundaryListeners = <VoidCallback>[];
-
-  /// Subscribe to boundary state changes.
-  void addBoundaryListener(VoidCallback callback) =>
-      _boundaryListeners.add(callback);
-
-  /// Unsubscribe from boundary state changes.
-  void removeBoundaryListener(VoidCallback callback) =>
-      _boundaryListeners.remove(callback);
-
-  void _notifyBoundary() {
-    // Iterate a snapshot — a listener may add or remove listeners while
-    // reacting to the boundary change.
-    for (final cb in List<VoidCallback>.of(
-      _boundaryListeners,
-      growable: false,
-    )) {
-      cb();
+  /// Smoothly move the anchor onto [messageId] over [duration].
+  ///
+  /// Returns a Future that completes when the animation settles (or
+  /// immediately if no viewport is bound yet). When the target is far outside
+  /// the currently-built range, the viewport crossfades — instant jumpTo
+  /// under a brief opacity blink — rather than animating through messages it
+  /// would need to build on the fly.
+  Future<void> animateTo(
+    int messageId, {
+    Duration duration = const Duration(milliseconds: 300),
+    Curve curve = Curves.easeInOutCubic,
+  }) async {
+    final animator = _animator;
+    if (animator == null) {
+      jumpTo(messageId);
+      return;
+    }
+    _emitScroll(ChatAnimateStart(messageId, duration));
+    try {
+      await animator.animate(messageId, duration: duration, curve: curve);
+    } finally {
+      _emitScroll(ChatAnimateEnd(messageId));
     }
   }
 
-  /// Whether the oldest message in the conversation has been fetched.
-  bool get reachedOldest => _reachedOldest;
-  bool _reachedOldest = false;
-  set reachedOldest(bool value) {
-    if (_reachedOldest == value) return;
-    _reachedOldest = value;
-    _notifyBoundary();
+  // --- Scroll-animator binding (viewport-only) -----------------------------
+
+  ChatScrollAnimator? _animator;
+
+  /// Bound by `RenderChatScrollView` on attach. Detach passes `null`.
+  @internal
+  set animator(ChatScrollAnimator? value) => _animator = value;
+
+  // --- Visible range -------------------------------------------------------
+
+  final ValueNotifier<ChatVisibleRange?> _visibleRange =
+      ValueNotifier<ChatVisibleRange?>(null);
+
+  /// Inclusive id range of currently-on-screen messages plus the active
+  /// anchor id. `null` before the first layout has run (or when no message
+  /// intersects the paint area). Push as the viewport scrolls / re-fans.
+  ValueListenable<ChatVisibleRange?> get visibleRange => _visibleRange;
+
+  /// Viewport-only setter — `RenderChatScrollView` pushes the latest range
+  /// after every layout / Tier-1 reposition.
+  @internal
+  set visibleRange(ChatVisibleRange? value) => _visibleRange.value = value;
+
+  // --- Scroll events -------------------------------------------------------
+
+  final _scrollListeners = <ValueChanged<ChatScrollEvent>>[];
+
+  /// Subscribe to typed scroll events ([ChatUserDragStart], [ChatFlingStart],
+  /// [ChatProgrammaticJump], …).
+  void addScrollListener(ValueChanged<ChatScrollEvent> callback) =>
+      _scrollListeners.add(callback);
+
+  void removeScrollListener(ValueChanged<ChatScrollEvent> callback) =>
+      _scrollListeners.remove(callback);
+
+  /// Viewport-only emitter. Iterates a snapshot — a listener removing itself
+  /// or another listener during dispatch is safe.
+  @internal
+  void notifyScrollEvent(ChatScrollEvent event) => _emitScroll(event);
+
+  void _emitScroll(ChatScrollEvent event) {
+    if (_scrollListeners.isEmpty) return;
+    for (final cb in List<ValueChanged<ChatScrollEvent>>.of(
+      _scrollListeners,
+      growable: false,
+    )) {
+      cb(event);
+    }
   }
-
-  /// Whether the newest message in the conversation has been fetched.
-  bool get reachedNewest => _reachedNewest;
-  bool _reachedNewest = false;
-  set reachedNewest(bool value) {
-    if (_reachedNewest == value) return;
-    _reachedNewest = value;
-    _notifyBoundary();
-  }
-
-  /// The ID of the oldest known message, if any.
-  int? oldestKnownId;
-
-  /// The ID of the newest known message, if any.
-  int? newestKnownId;
 
   // --- Anchor state (read-only for public, writable for viewport) ---
 
@@ -110,6 +167,7 @@ class ChatScrollController {
   /// late notification cannot reach a torn-down listener.
   void dispose() {
     _jumpListeners.clear();
-    _boundaryListeners.clear();
+    _scrollListeners.clear();
+    _visibleRange.dispose();
   }
 }

@@ -23,20 +23,25 @@ import '../benchmark/shared/test_messages.dart';
 class _Preloaded extends ChatDataSource {
   _Preloaded(List<IChatMessage> messages) {
     upsertMessages(messages);
+    if (messages.isNotEmpty) {
+      seedBoundaries(
+        oldestKnownId: 0,
+        newestKnownId: messages.length - 1,
+        reachedOldest: true,
+        reachedNewest: true,
+      );
+    }
   }
 
   @override
-  Future<List<IChatMessage>> fetch({int? from, int? to, DateTime? after}) async =>
-      const <IChatMessage>[];
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
+  }) async => const <IChatMessage>[];
 }
 
 Future<RenderChatScrollView> _pump(WidgetTester tester, int count) async {
-  final controller = ChatScrollController()
-    ..oldestKnownId = 0
-    ..newestKnownId = count - 1
-    ..reachedOldest = true
-    ..reachedNewest = true;
-  controller.jumpTo(count - 1);
+  final controller = ChatScrollController()..jumpTo(count - 1);
 
   await tester.pumpWidget(
     MaterialApp(

@@ -76,7 +76,7 @@ List<IChatMessage> generateMessages(int count) {
     }
 
     messages.add(
-      ChatMessage$User(
+      UserChatMessage(
         id: i,
         sender: 'User',
         createdAt: time,

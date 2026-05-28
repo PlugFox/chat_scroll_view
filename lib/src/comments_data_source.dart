@@ -84,10 +84,9 @@ class CommentsDataSource extends ChatDataSource {
       LinkedHashMap<int, List<IChatMessage>>();
 
   @override
-  Future<List<IChatMessage>> fetch({
-    int? from,
-    int? to,
-    DateTime? after,
+  Future<List<IChatMessage>> fetchRange({
+    required int fromId,
+    required int toId,
   }) async {
     // Simulate network delay.
     await Future<void>.delayed(fetchDelay);
@@ -95,9 +94,8 @@ class CommentsDataSource extends ChatDataSource {
     // Empty manifest — no messages to serve.
     if (manifest.totalMessages <= 0) return const [];
 
-    final lo = (from ?? 0).clamp(0, manifest.totalMessages - 1);
-    final hi = (to ?? manifest.totalMessages - 1)
-        .clamp(0, manifest.totalMessages - 1);
+    final lo = fromId.clamp(0, manifest.totalMessages - 1);
+    final hi = toId.clamp(0, manifest.totalMessages - 1);
 
     // Determine which asset chunks we need.
     final firstAssetChunk = lo ~/ manifest.chunkSize;
@@ -113,6 +111,33 @@ class CommentsDataSource extends ChatDataSource {
     }
 
     return result;
+  }
+
+  @override
+  Future<ChatInitialPage> fetchInitial({int? limit}) async {
+    // We know the bounds of the manifest upfront — fetchInitial just hands
+    // them over with a slice of the newest page.
+    final total = manifest.totalMessages;
+    if (total <= 0) {
+      return (
+        messages: const <IChatMessage>[],
+        oldestId: null,
+        newestId: null,
+        reachedOldest: true,
+        reachedNewest: true,
+      );
+    }
+    final pageSize = limit ?? 64;
+    final fromId = (total - pageSize).clamp(0, total - 1);
+    final toId = total - 1;
+    final messages = await fetchRange(fromId: fromId, toId: toId);
+    return (
+      messages: messages,
+      oldestId: 0,
+      newestId: total - 1,
+      reachedOldest: true,
+      reachedNewest: true,
+    );
   }
 
   Future<List<IChatMessage>> _loadAssetChunk(int assetChunkIndex) async {
@@ -132,7 +157,7 @@ class CommentsDataSource extends ChatDataSource {
     final baseTime = DateTime.now();
     final messages = <IChatMessage>[
       for (final item in list)
-        ChatMessage$User(
+        UserChatMessage(
           id: item['id']! as int,
           sender: item['sender']! as String,
           createdAt: DateTime.tryParse(item['createdAt'] as String? ?? '') ??

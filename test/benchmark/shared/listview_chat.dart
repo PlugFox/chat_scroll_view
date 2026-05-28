@@ -81,8 +81,8 @@ class RenderCustomPaintBubble extends RenderBox {
 
   void _buildParagraph(double maxWidth) {
     final content = switch (_message) {
-      ChatMessage$User(:final content) => content,
-      ChatMessage$System(:final content) => content,
+      UserChatMessage(:final content) => content,
+      SystemChatMessage(:final content) => content,
       _ => 'Message #${_message.id}',
     };
 
@@ -167,8 +167,8 @@ class _TextBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final content = switch (message) {
-      ChatMessage$User(:final content) => content,
-      ChatMessage$System(:final content) => content,
+      UserChatMessage(:final content) => content,
+      SystemChatMessage(:final content) => content,
       _ => 'Message #${message.id}',
     };
 
