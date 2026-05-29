@@ -109,6 +109,28 @@ class ChatScrollController {
   @internal
   set visibleRange(ChatVisibleRange? value) => _visibleRange.value = value;
 
+  // --- Tail tracking -------------------------------------------------------
+
+  final ValueNotifier<bool> _isAtTail = ValueNotifier<bool>(false);
+
+  /// Whether the *newest* known message is currently in the paint area and
+  /// the data source has reported [ChatDataSource.reachedNewest]. `false`
+  /// when the conversation has no boundary yet, the viewport is in overlay
+  /// mode, or the user has scrolled away from the bottom.
+  ///
+  /// Drives the canonical "follow tail" UI patterns: hide a
+  /// new-messages-pill when the user is already pinned to the newest, show
+  /// it when they've scrolled away. A separate "messages since I left the
+  /// tail" counter is the consumer's responsibility — derive it from this
+  /// flag plus `dataSource.newestKnownId` so the controller stays
+  /// decoupled from the data source.
+  ValueListenable<bool> get isAtTail => _isAtTail;
+
+  /// Viewport-only setter — `RenderChatScrollView` pushes after every
+  /// layout / Tier-1 reposition.
+  @internal
+  set isAtTail(bool value) => _isAtTail.value = value;
+
   // --- Scroll events -------------------------------------------------------
 
   final _scrollListeners = <ValueChanged<ChatScrollEvent>>[];
@@ -169,5 +191,6 @@ class ChatScrollController {
     _jumpListeners.clear();
     _scrollListeners.clear();
     _visibleRange.dispose();
+    _isAtTail.dispose();
   }
 }

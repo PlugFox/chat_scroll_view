@@ -8,6 +8,7 @@ import 'package:chatscrollview/src/chat_widgets/demo/chat_composer.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/date_separator.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/demo_message.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/measure_size.dart';
+import 'package:chatscrollview/src/chat_widgets/demo/new_messages_pill.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/selection_app_bar.dart';
 import 'package:chatscrollview/src/comments_data_source.dart';
 import 'package:flutter/material.dart';
@@ -145,6 +146,13 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
                 dataSource: _dataSource!,
               ),
             ),
+          ),
+          // New-messages pill — surfaces above the composer when the user
+          // is scrolled away and newer messages have arrived.
+          NewMessagesPill(
+            controller: _controller,
+            dataSource: _dataSource!,
+            bottomInset: _bottomInset,
           ),
           // Contextual selection bar — overlays the top, so the chat never
           // resizes when selection mode toggles.

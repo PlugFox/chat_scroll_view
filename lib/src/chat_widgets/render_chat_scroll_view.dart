@@ -161,8 +161,9 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       _cancelAnimate();
       _controller
         ..removeJumpListener(_onJump)
-        ..animator = null;
-      _controller.visibleRange = null;
+        ..animator = null
+        ..visibleRange = null
+        ..isAtTail = false;
     }
     _controller = value;
     if (attached) {
@@ -235,6 +236,14 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// Set when [bottomPadding] changed; consumed by the next [performLayout]
   /// to re-pin the newest message when the viewport was sitting at the bottom.
   bool _bottomPaddingDirty = false;
+
+  /// `isAtTail` snapshot taken at the end of the previous layout. Combined
+  /// with [_lastSeenNewestId] this drives the follow-tail behavior: when the
+  /// viewport was at the tail in the previous layout and the newest id has
+  /// since advanced, the next layout repins the (now-larger) newest message
+  /// to the bottom edge — auto-scroll the chat to the new message.
+  bool _wasAtTailLastLayout = false;
+  int? _lastSeenNewestId;
 
   /// Empty space reserved at the *top* of the viewport — compensation for top
   /// chrome (an app bar). The floating day header rests just below it.
@@ -546,8 +555,9 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       ..removeJumpListener(_onJump)
       ..animator = null
       // Mirror the controller-swap path: once no viewport is bound, the
-      // last-published range no longer reflects anything observable.
-      ..visibleRange = null;
+      // last-published state no longer reflects anything observable.
+      ..visibleRange = null
+      ..isAtTail = false;
     _cancelAnimate();
     _bottomPadding?.removeListener(_onBottomPaddingChanged);
     _topPadding?.removeListener(_onTopPaddingChanged);
@@ -689,10 +699,22 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
 
     final anchorBefore = _controller.anchorMessageId;
     _renormalizeAnchor();
-    // When the bottom inset changed while the viewport was pinned at the
-    // newest message, let the clamp carry the content along with the inset.
-    final repinBottom =
-        _bottomPaddingDirty && _dataSource.reachedNewest && !_canRevealNewer;
+    // Two reasons to forcibly re-pin newest to the bottom edge:
+    //   1. bottom inset changed while the viewport was pinned (composer
+    //      grew, ...) — carry the content with the inset.
+    //   2. follow-tail: viewport was at the tail in the previous layout and
+    //      the newest message id has since advanced. The new message lives
+    //      below the previous bottomEdge, so the default "pin only when
+    //      bottom < bottomEdge" path would leave it off-screen.
+    // Both paths gate on `_wasAtTailLastLayout` — without it, the bottom
+    // pin would yank content the user scrolled away from back to the tail.
+    final newest = _dataSource.newestKnownId;
+    final tailAdvanced = _wasAtTailLastLayout &&
+        newest != null &&
+        (_lastSeenNewestId == null || newest > _lastSeenNewestId!);
+    final repinBottom = _dataSource.reachedNewest &&
+        _wasAtTailLastLayout &&
+        (_bottomPaddingDirty || tailAdvanced);
     _bottomPaddingDirty = false;
     final clamped = _clampBoundaries(repinBottom: repinBottom);
     if (clamped) _cancelFling();
@@ -752,7 +774,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     }
     _evictChunks();
     _updateScrollSemantics();
-    _publishVisibleRange();
+    _publishControllerState();
     _scheduleFetchPoll();
     _updateFloatingHeader();
 
@@ -819,7 +841,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _ticker?.stop();
     _evictChunks();
     _updateScrollSemantics();
-    _publishVisibleRange();
+    _publishControllerState();
     _scheduleFetchPoll();
   }
 
@@ -1553,7 +1575,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       _cancelAnimate();
     }
     _updateScrollSemantics();
-    _publishVisibleRange();
+    _publishControllerState();
     // Reposition the header (Tier-1); a day crossing needs a relayout to
     // rebuild its text.
     final headerDayChanged = _tickFloatingHeader();
@@ -1829,8 +1851,43 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   // --- Visible range publishing --------------------------------------------
 
   /// Push the current first/last on-screen ids + anchor id to the controller's
-  /// `visibleRange` listenable. Called after every layout and Tier-1 tick —
-  /// O(visible children) of pure parent-data reads.
+  /// `visibleRange` listenable, and update its `isAtTail` flag. Called after
+  /// every layout and Tier-1 tick — O(visible children) of pure parent-data
+  /// reads.
+  void _publishControllerState() {
+    _publishVisibleRange();
+    _publishIsAtTail();
+  }
+
+  /// Whether the newest known message is currently pinned to the bottom of
+  /// the viewport — the "follow tail" signal. False in overlay mode, when no
+  /// newestKnownId / reachedNewest is set, when the newest is not built, or
+  /// when the user has scrolled it away from the bottom.
+  bool _computeIsAtTail() {
+    if (_overlayKind != ChatOverlayKind.none) return false;
+    final newest = _dataSource.newestKnownId;
+    if (newest == null || !_dataSource.reachedNewest) return false;
+    final last = _boundaryBox(newest);
+    if (last == null) return false;
+    final pd = _parentData(last);
+    final bottomEdge = size.height - _bottomPad;
+    final bottom = pd.offset + last.size.height;
+    // Within `0.5` px of the bottom inset — matches `_computeCanRevealNewer`.
+    return bottom <= bottomEdge + 0.5 && pd.offset < bottomEdge;
+  }
+
+  void _publishIsAtTail() {
+    final value = _computeIsAtTail();
+    // Snapshot for the *next* performLayout: follow-tail compares
+    // "was at tail before" + "newest id advanced since" against the live
+    // data-source state. Snapshot fires from both layout and Tier-1 tick
+    // paths so the value is always fresh at the start of the next layout.
+    _wasAtTailLastLayout = value;
+    _lastSeenNewestId = _dataSource.newestKnownId;
+    if (_controller.isAtTail.value == value) return;
+    _controller.isAtTail = value;
+  }
+
   void _publishVisibleRange() {
     if (_children.isEmpty) {
       _controller.visibleRange = null;
