@@ -639,6 +639,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   @override
   void attach(PipelineOwner owner) {
     super.attach(owner);
+    _jumpFetchDispatchDetached = false;
     for (final child in _children.values) {
       child.attach(owner);
     }
@@ -681,6 +682,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _ticker = null;
     _pollTimer?.cancel();
     _pollTimer = null;
+    _jumpFetchDispatchDetached = true;
     // Drop our listener first — cancelFetch notifies, and a `markNeedsLayout`
     // on a detaching render object is brittle even if currently harmless.
     // We do cancel the running fetch / retry timer here: the dominant case is
@@ -771,33 +773,60 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // running an invisible fade against the old slot — drop it.
     _clearHighlight();
     _cancelBounceback();
-    // Treat a jump as a discrete user intent (scrollbar drag, Home/End,
-    // programmatic `controller.jumpTo`) — *not* part of a continuous fling
-    // or wheel scroll. The fetch-poll's scroll-debounce was designed to
-    // hold off network traffic until a fast scroll settles, but a jump
-    // *is* the settle. Without this reset:
-    //
-    //   * `_pollTimer` may still be armed for the previous range — the
-    //     guard in `_scheduleFetchPoll` (line ~1997) silently skips the
-    //     re-arm because a timer already exists, so the next layout's
-    //     fetch-poll for the new range never gets a chance to fire on its
-    //     own short delay.
-    //   * `_lastScrollTs` may have been bumped within the last
-    //     `_pollInterval` by an earlier gesture / wheel / fling tick. The
-    //     next layout's `_scheduleFetchPoll` would then arm with the full
-    //     `_pollInterval` delay, and `_onPollTick`'s same-debounce check
-    //     would skip the fetch outright — chunks at the new anchor stay
-    //     `dirty` forever until the user *also* nudges the viewport with
-    //     a gesture, which is what the user-visible bug looked like.
-    //
-    // Dropping the timer + clearing the timestamp ensures the next layout
-    // arms a fresh `Duration.zero` poll and the resulting tick actually
-    // dispatches the fetch.
+    // Reset the fetch-poll scroll-debounce state. A jump is a discrete
+    // user intent (scrollbar drag, Home/End, programmatic
+    // `controller.jumpTo`), not part of a continuous fling / wheel
+    // scroll. Dropping any stale `_pollTimer` and clearing
+    // `_lastScrollTs` ensures the next layout's `_scheduleFetchPoll`
+    // arms with delay zero and `_onPollTick`'s same-debounce check
+    // passes.
     _pollTimer?.cancel();
     _pollTimer = null;
     _lastScrollTs = 0;
     markNeedsLayout();
+    // Belt-and-suspenders: also dispatch the fetch *directly* in a
+    // post-frame callback. Rapid scrollbar drag fires many `_onJump`s
+    // in succession, and the bookkeeping above (cancel + re-arm)
+    // races with pointer events — the armed poll timer may be
+    // cancelled by the *next* `_onJump` before its microtask gets to
+    // fire, leaving the new range with no in-flight fetch.
+    //
+    // The post-frame callback runs *after* the upcoming layout has
+    // updated `_layoutMinChunk`/`_layoutMaxChunk`. Calling
+    // `requestChunks` directly is idempotent: a sameRange in-flight
+    // request bails inside the data source, so the extra callbacks
+    // queued by a long drag collapse to one effective fetch for the
+    // final range. This bypasses the timer entirely and removes the
+    // race against rapid pointer dispatch.
+    _scheduleJumpFetchDispatch();
   }
+
+  /// Set when a jump has queued a post-frame fetch dispatch and we
+  /// have not yet processed it. Prevents a long scrollbar drag from
+  /// queueing dozens of redundant callbacks (one per move).
+  bool _jumpFetchDispatchPending = false;
+
+  void _scheduleJumpFetchDispatch() {
+    if (_jumpFetchDispatchPending) return;
+    _jumpFetchDispatchPending = true;
+    SchedulerBinding.instance.addPostFrameCallback(_dispatchJumpFetch);
+  }
+
+  void _dispatchJumpFetch(Duration _) {
+    _jumpFetchDispatchPending = false;
+    // The post-frame fires after the frame's layout phase, so
+    // `_layoutMinChunk`/`_layoutMaxChunk` reflect the jump's new range.
+    // Empty range (overlay mode, no built children) — nothing to fetch.
+    if (_layoutMaxChunk < _layoutMinChunk) return;
+    // No attached data source after detach. Defensive: post-frame
+    // callbacks can outlive a detach by exactly one frame.
+    if (_jumpFetchDispatchDetached) return;
+    _dataSource.requestChunks(_layoutMinChunk, _layoutMaxChunk);
+  }
+
+  /// Cleared on attach, set on detach — guards the post-frame callback
+  /// from touching a stale data source.
+  bool _jumpFetchDispatchDetached = false;
 
   void _onScrollBy(double delta) {
     _cancelFling();
