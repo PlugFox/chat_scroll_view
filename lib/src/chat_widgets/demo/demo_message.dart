@@ -395,3 +395,138 @@ class DemoShimmerBubble extends StatelessWidget {
     ),
   );
 }
+
+// --- Chunk-error tile -----------------------------------------------------
+
+/// Failure tile shown in place of an entire chunk whose fetch errored. One
+/// per chunk (not 64 per-message slots), tapping "Retry" cancels the
+/// running backoff and re-fetches the chunk immediately.
+class DemoChunkErrorTile extends StatelessWidget {
+  const DemoChunkErrorTile({
+    required this.firstId,
+    required this.lastId,
+    required this.onRetry,
+    super.key,
+  });
+
+  final int firstId;
+  final int lastId;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: _kContentMaxWidth),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xFF3A2A2A),
+            border: Border.all(color: const Color(0xFF6B3A3A)),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+            child: Row(
+              children: <Widget>[
+                const Icon(
+                  Icons.error_outline_rounded,
+                  size: 20,
+                  color: Color(0xFFE57373),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Failed to load messages $firstId–$lastId',
+                    style: const TextStyle(
+                      color: Color(0xFFE6E7EB),
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: onRetry,
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFE57373),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+// --- Empty state ----------------------------------------------------------
+
+/// Full-viewport empty state. Shown when the data source reports
+/// [ChatDataSource.isEmpty] — the conversation has no messages.
+class DemoEmptyState extends StatelessWidget {
+  const DemoEmptyState({super.key});
+
+  @override
+  Widget build(BuildContext context) => const Center(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Icon(
+          Icons.forum_outlined,
+          size: 48,
+          color: Color(0xFF6E7280),
+        ),
+        SizedBox(height: 12),
+        Text(
+          'No messages yet',
+          style: TextStyle(
+            color: Color(0xFFE6E7EB),
+            fontSize: 16,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        SizedBox(height: 4),
+        Text(
+          'Start the conversation below.',
+          style: TextStyle(
+            color: Color(0xFF8E94A2),
+            fontSize: 13,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+// --- Initial loading skeleton --------------------------------------------
+
+/// Full-viewport skeleton shown before the first chunk lands. A stack of
+/// shimmer bubbles standing in for the message list, plus a small spinner —
+/// fills the viewport so the user sees layout structure immediately instead
+/// of waiting on a blank screen.
+class DemoInitialSkeleton extends StatelessWidget {
+  const DemoInitialSkeleton({super.key});
+
+  @override
+  Widget build(BuildContext context) => const Column(
+    children: <Widget>[
+      SizedBox(height: 24),
+      DemoShimmerBubble(),
+      DemoShimmerBubble(),
+      DemoShimmerBubble(),
+      DemoShimmerBubble(),
+      Spacer(),
+      SizedBox(
+        width: 22,
+        height: 22,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF8E94A2)),
+        ),
+      ),
+      SizedBox(height: 32),
+    ],
+  );
+}

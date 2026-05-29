@@ -59,6 +59,27 @@ abstract class ChatDataSource {
   /// edge when both this is `true` and the newest is in view.
   bool get reachedNewest => _reachedNewest;
 
+  /// Whether the conversation is known to contain no messages — both
+  /// boundaries are reached and neither id was set. Distinct from "nothing
+  /// loaded yet" ([isInitialLoading]): empty is a *confirmed* terminal state.
+  /// The viewport switches to its empty overlay when this is `true` and a
+  /// builder is provided.
+  bool get isEmpty =>
+      _reachedOldest &&
+      _reachedNewest &&
+      _oldestKnownId == null &&
+      _newestKnownId == null;
+
+  /// Whether the data source has not yet seen any messages or boundaries —
+  /// the very first page is still being resolved. Distinct from [isEmpty]:
+  /// initial-loading is *unknown* (either side may still produce ids). The
+  /// viewport switches to its loading overlay when this is `true` and a
+  /// builder is provided.
+  bool get isInitialLoading {
+    if (_oldestKnownId != null || _newestKnownId != null) return false;
+    return !_reachedOldest && !_reachedNewest;
+  }
+
   /// Atomically set the boundary state. Notifies listeners only if anything
   /// actually changed. Intended for subclasses to call after a fetch resolves
   /// — but also exposed publicly so consumers that pre-load their data can
@@ -94,13 +115,21 @@ abstract class ChatDataSource {
       'oldestKnownId ($_oldestKnownId) must be ≤ newestKnownId '
       '($_newestKnownId)',
     );
+    // An empty conversation is `reachedOldest && reachedNewest` with both ids
+    // null — there are no messages, so no oldest/newest exists to point at.
+    // The assert allows that, but still catches half-empty seeding.
+    final empty = _reachedOldest && _reachedNewest;
     assert(
-      !_reachedOldest || _oldestKnownId != null,
-      'reachedOldest=true requires oldestKnownId to be set',
+      !_reachedOldest || _oldestKnownId != null || empty,
+      'reachedOldest=true requires oldestKnownId to be set '
+      '(unless the conversation is empty: reachedNewest also true, '
+      'newestKnownId also null)',
     );
     assert(
-      !_reachedNewest || _newestKnownId != null,
-      'reachedNewest=true requires newestKnownId to be set',
+      !_reachedNewest || _newestKnownId != null || empty,
+      'reachedNewest=true requires newestKnownId to be set '
+      '(unless the conversation is empty: reachedOldest also true, '
+      'oldestKnownId also null)',
     );
     if (changed) _notifyBoundary();
   }
@@ -236,6 +265,32 @@ abstract class ChatDataSource {
   /// Cancel any in-flight fetch and retry timer.
   @internal
   void cancelFetch() => _cancelFetch();
+
+  /// Force an immediate re-fetch of the chunk containing [messageId],
+  /// bypassing the in-flight backoff.
+  ///
+  /// Intended for UI retry — the user taps "Retry" on a chunk that failed,
+  /// and the viewport's poll alone would either wait out the backoff or skip
+  /// the chunk if the user is no longer near it. This cancels any pending
+  /// retry timer, resets the backoff step, and fires a fresh fetch scoped to
+  /// the single chunk. A new fan-out / poll cycle will fold neighbouring
+  /// missing chunks in afterwards if needed.
+  ///
+  /// No-op when the chunk does not exist or is already loaded successfully.
+  void retryChunk(int messageId) {
+    final chunkIndex = ChatScrollChunk.chunkOf(messageId);
+    final chunk = _chunks[chunkIndex];
+    // Already valid → nothing to retry. (A chunk currently fetching is also
+    // fine to retry: the cancel below drops the in-flight token before we
+    // re-launch, so we don't double-fetch.)
+    if (chunk != null && chunk.status.isValid) return;
+
+    _cancelFetch();
+    _fetchRetryStep = 0;
+    _fetchingMinChunk = chunkIndex;
+    _fetchingMaxChunk = chunkIndex;
+    _executeFetch();
+  }
 
   void _cancelFetch() {
     // Clear the `fetching` flag from chunks that were part of the in-flight

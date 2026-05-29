@@ -90,6 +90,21 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
     );
   }
 
+  Widget _buildChunkError(
+    BuildContext context,
+    ChatChunkRange chunk,
+    VoidCallback retry,
+  ) => DemoChunkErrorTile(
+    firstId: chunk.firstId,
+    lastId: chunk.lastId,
+    onRetry: retry,
+  );
+
+  Widget _buildEmpty(BuildContext context) => const DemoEmptyState();
+
+  Widget _buildInitialSkeleton(BuildContext context) =>
+      const DemoInitialSkeleton();
+
   @override
   Widget build(BuildContext context) {
     if (_loading || _dataSource == null) {
@@ -108,6 +123,9 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
                 selectionController: _selection,
                 bottomPadding: _bottomInset,
                 messageBuilder: _buildMessage,
+                errorBuilder: _buildChunkError,
+                emptyBuilder: _buildEmpty,
+                loadingBuilder: _buildInitialSkeleton,
                 dateSeparatorBuilder: (context, date) =>
                     DateSeparator(date: date),
               ),

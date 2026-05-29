@@ -8,9 +8,28 @@ import 'package:chatscrollview/src/chat_widgets/chat_selectable_message.dart';
 import 'package:chatscrollview/src/chat_widgets/render_chat_scroll_view.dart';
 import 'package:flutter/widgets.dart';
 
-/// Slot for the single floating day header — kept distinct from the int-keyed
-/// message children so [ChatScrollElement] can route it separately.
-enum _ChatSlot { floatingHeader }
+/// Singleton slots — kept distinct from the int-keyed message children and
+/// the chunk-error slots so [ChatScrollElement] can route them separately.
+///
+/// * `floatingHeader` — pinned day pill at the top of the viewport.
+/// * `overlay` — the single full-viewport child for the loading skeleton or
+///   the empty state.
+enum _ChatSlot { floatingHeader, overlay }
+
+/// Slot for a chunk-error tile — one tile per failed chunk. Wraps the chunk
+/// index so it cannot be confused with an `int` message-id slot.
+@immutable
+class _ChunkErrorSlot {
+  const _ChunkErrorSlot(this.chunkIndex);
+  final int chunkIndex;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _ChunkErrorSlot && other.chunkIndex == chunkIndex;
+
+  @override
+  int get hashCode => Object.hash(_ChunkErrorSlot, chunkIndex);
+}
 
 /// Element for [ChatScrollView].
 ///
@@ -34,8 +53,18 @@ class ChatScrollElement extends RenderObjectElement
   final Map<int, ChatMessageStatus> _builtStatus = <int, ChatMessageStatus>{};
   final Map<int, bool> _builtStartsDay = <int, bool>{};
 
+  /// chunkIndex -> chunk-error tile element, sorted ascending. Empty unless
+  /// the host widget supplies an `errorBuilder`.
+  final SplayTreeMap<int, Element> _chunkErrors = SplayTreeMap<int, Element>();
+
   /// The floating day header element, or `null` when no header is shown.
   Element? _floatingHeader;
+
+  /// The full-viewport overlay element (loading skeleton or empty state), or
+  /// `null` when the viewport is in normal fan-out mode. The render side
+  /// owns the active [ChatOverlayKind] and only calls `buildOverlay` when it
+  /// changes — the element just holds the inflated child.
+  Element? _overlay;
 
   ChatScrollView get _widget => widget as ChatScrollView;
 
@@ -72,6 +101,12 @@ class ChatScrollElement extends RenderObjectElement
     // not change — the day-bucket gate alone would skip it.
     if (old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder) {
       renderObject.invalidateFloatingHeader();
+    }
+    // A swapped errorBuilder must re-inflate every visible chunk-error tile
+    // so the new builder runs against existing slots.
+    if (old.errorBuilder != newWidget.errorBuilder &&
+        _chunkErrors.isNotEmpty) {
+      renderObject.markNeedsLayout();
     }
   }
 
@@ -184,15 +219,90 @@ class ChatScrollElement extends RenderObjectElement
     return _floatingHeader?.renderObject as RenderBox?;
   }
 
+  @override
+  RenderBox? buildChunkError(int chunkIndex, int firstId, int lastId) {
+    final build = _widget.errorBuilder;
+    // Defensive: the render side only calls this when `hasErrorBuilder` is
+    // true, but the host may have flipped the builder away on the same frame.
+    if (build == null) return null;
+    final ds = _widget.dataSource;
+    final widget = RepaintBoundary(
+      key: ValueKey<({Symbol tag, int idx})>((
+        tag: #chunkError,
+        idx: chunkIndex,
+      )),
+      child: Builder(
+        builder: (ctx) => build(
+          ctx,
+          (firstId: firstId, lastId: lastId),
+          () => ds.retryChunk(firstId),
+        ),
+      ),
+    );
+    Element? updated;
+    owner!.buildScope(this, () {
+      updated = updateChild(
+        _chunkErrors[chunkIndex],
+        widget,
+        _ChunkErrorSlot(chunkIndex),
+      );
+      if (updated != null) {
+        _chunkErrors[chunkIndex] = updated!;
+      } else {
+        _chunkErrors.remove(chunkIndex);
+      }
+    });
+    return updated?.renderObject as RenderBox?;
+  }
+
+  @override
+  void removeChunkErrors(List<int> chunkIndices) {
+    if (chunkIndices.isEmpty) return;
+    owner!.buildScope(this, () {
+      for (final idx in chunkIndices) {
+        final removed = updateChild(
+          _chunkErrors[idx],
+          null,
+          _ChunkErrorSlot(idx),
+        );
+        assert(removed == null);
+        _chunkErrors.remove(idx);
+      }
+    });
+  }
+
+  @override
+  RenderBox? buildOverlay(ChatOverlayKind kind) {
+    final Widget? widget;
+    switch (kind) {
+      case ChatOverlayKind.none:
+        widget = null;
+      case ChatOverlayKind.loading:
+        final build = _widget.loadingBuilder;
+        widget = build == null ? null : Builder(builder: build);
+      case ChatOverlayKind.empty:
+        final build = _widget.emptyBuilder;
+        widget = build == null ? null : Builder(builder: build);
+    }
+    owner!.buildScope(this, () {
+      _overlay = updateChild(_overlay, widget, _ChatSlot.overlay);
+    });
+    return _overlay?.renderObject as RenderBox?;
+  }
+
   // --- RenderObjectElement plumbing -----------------------------------------
 
   @override
   void insertRenderObjectChild(RenderObject child, Object? slot) {
     if (slot is int) {
       renderObject.insertChild(child as RenderBox, slot);
-    } else {
-      assert(slot == _ChatSlot.floatingHeader);
+    } else if (slot is _ChunkErrorSlot) {
+      renderObject.insertChunkError(child as RenderBox, slot.chunkIndex);
+    } else if (slot == _ChatSlot.floatingHeader) {
       renderObject.floatingHeader = child as RenderBox;
+    } else {
+      assert(slot == _ChatSlot.overlay);
+      renderObject.overlay = child as RenderBox;
     }
   }
 
@@ -200,9 +310,13 @@ class ChatScrollElement extends RenderObjectElement
   void removeRenderObjectChild(RenderObject child, Object? slot) {
     if (slot is int) {
       renderObject.removeChild(slot);
-    } else {
-      assert(slot == _ChatSlot.floatingHeader);
+    } else if (slot is _ChunkErrorSlot) {
+      renderObject.removeChunkError(slot.chunkIndex);
+    } else if (slot == _ChatSlot.floatingHeader) {
       renderObject.floatingHeader = null;
+    } else {
+      assert(slot == _ChatSlot.overlay);
+      renderObject.overlay = null;
     }
   }
 
@@ -220,14 +334,24 @@ class ChatScrollElement extends RenderObjectElement
     for (final child in _children.values) {
       visitor(child);
     }
+    for (final child in _chunkErrors.values) {
+      visitor(child);
+    }
     final header = _floatingHeader;
     if (header != null) visitor(header);
+    final overlay = _overlay;
+    if (overlay != null) visitor(overlay);
   }
 
   @override
   void forgetChild(Element child) {
     if (identical(child, _floatingHeader)) {
       _floatingHeader = null;
+    } else if (identical(child, _overlay)) {
+      _overlay = null;
+    } else if (child.slot is _ChunkErrorSlot) {
+      final idx = (child.slot! as _ChunkErrorSlot).chunkIndex;
+      _chunkErrors.remove(idx);
     } else {
       assert(child.slot is int);
       assert(_children.containsKey(child.slot));

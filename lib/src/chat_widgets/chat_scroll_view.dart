@@ -27,6 +27,23 @@ typedef ChatMessageBuilder =
 typedef ChatDateSeparatorBuilder =
     Widget Function(BuildContext context, DateTime date);
 
+/// Range of message ids covered by a single chat chunk, passed to
+/// [ChatChunkErrorBuilder].
+typedef ChatChunkRange = ({int firstId, int lastId});
+
+/// Builds the error widget shown in place of an entire failed chunk.
+///
+/// One widget per chunk — not 64 per-message tiles — sits where the chunk
+/// would have lived, sized to its own intrinsic height. Tap [retry] to
+/// re-fetch that chunk (cancels the running backoff timer and fires
+/// immediately).
+typedef ChatChunkErrorBuilder =
+    Widget Function(
+      BuildContext context,
+      ChatChunkRange chunk,
+      VoidCallback retry,
+    );
+
 /// Default day grouping — the local calendar day. A `DateTime` with
 /// hours/minutes/seconds zeroed is equatable enough for the day-bucket gate;
 /// no need to pack y/m/d into an int.
@@ -51,6 +68,9 @@ class ChatScrollView extends RenderObjectWidget {
     required this.dataSource,
     required this.controller,
     required this.messageBuilder,
+    this.errorBuilder,
+    this.emptyBuilder,
+    this.loadingBuilder,
     this.selectionController,
     this.bottomPadding,
     this.topPadding,
@@ -72,6 +92,33 @@ class ChatScrollView extends RenderObjectWidget {
   /// top-level function or a cached closure) — a new closure each parent
   /// rebuild forces every visible message to re-inflate.
   final ChatMessageBuilder messageBuilder;
+
+  /// Builds the failure tile shown in place of an entire errored chunk.
+  ///
+  /// When set, an errored chunk in the build range is replaced by **one**
+  /// widget (sized to its own intrinsic height) rather than 64 per-message
+  /// placeholders carrying `status.isError`. When `null`, falls back to the
+  /// per-message path — the [messageBuilder] still receives the error
+  /// status for every id in the chunk and chooses what to render.
+  ///
+  /// The supplied retry callback cancels the running backoff and re-fetches
+  /// the chunk immediately. Pass a stable reference, like [messageBuilder].
+  final ChatChunkErrorBuilder? errorBuilder;
+
+  /// Builds the full-viewport widget shown when the conversation is known to
+  /// be empty (data source reports [ChatDataSource.isEmpty]).
+  ///
+  /// When `null`, the viewport simply renders nothing — `messageBuilder`
+  /// is never called because no ids exist.
+  final WidgetBuilder? emptyBuilder;
+
+  /// Builds the full-viewport skeleton shown before the first chunk lands
+  /// (data source reports [ChatDataSource.isInitialLoading]).
+  ///
+  /// When `null`, the viewport falls back to the existing path — shimmer
+  /// placeholders from `messageBuilder(id, null, fetching)` fan out from
+  /// the anchor while the first page loads.
+  final WidgetBuilder? loadingBuilder;
 
   /// Optional whole-message selection. When non-null every message is wrapped
   /// in selection chrome (a checkbox gutter + row tint) and long-press / tap
@@ -164,6 +211,9 @@ class ChatScrollView extends RenderObjectWidget {
         bottomPadding: bottomPadding,
         topPadding: topPadding,
         groupBy: _effectiveGroupBy,
+        hasErrorBuilder: errorBuilder != null,
+        hasEmptyBuilder: emptyBuilder != null,
+        hasLoadingBuilder: loadingBuilder != null,
       );
 
   @override
@@ -180,6 +230,9 @@ class ChatScrollView extends RenderObjectWidget {
       ..reverse = reverse
       ..bottomPadding = bottomPadding
       ..topPadding = topPadding
-      ..groupBy = _effectiveGroupBy;
+      ..groupBy = _effectiveGroupBy
+      ..hasErrorBuilder = errorBuilder != null
+      ..hasEmptyBuilder = emptyBuilder != null
+      ..hasLoadingBuilder = loadingBuilder != null;
   }
 }
