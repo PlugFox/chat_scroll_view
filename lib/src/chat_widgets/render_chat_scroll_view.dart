@@ -544,7 +544,10 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _dataSource.cancelFetch();
     _controller
       ..removeJumpListener(_onJump)
-      ..animator = null;
+      ..animator = null
+      // Mirror the controller-swap path: once no viewport is bound, the
+      // last-published range no longer reflects anything observable.
+      ..visibleRange = null;
     _cancelAnimate();
     _bottomPadding?.removeListener(_onBottomPaddingChanged);
     _topPadding?.removeListener(_onTopPaddingChanged);
@@ -1456,15 +1459,23 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
 
     if (_farAnimateActive) {
       // 0 → 0.5 → 1: opacity 1 → 0 → 1. Mid-point performs the jumpTo.
-      final eased = _animateCurve.transform(t);
+      // Apply the curve to each half independently. Using one
+      // `curve.transform(t)` across the full 0..1 range would not guarantee
+      // opacity == 0 at the midpoint for non-symmetric curves (e.g.
+      // `easeInOut*` family transforms 0.5 to ≈0.5 but easeIn / easeOut
+      // do not), so the synchronous `jumpTo` could happen while the
+      // viewport is still partially visible. Per-half normalisation pins
+      // opacity to exactly 0 at t == 0.5.
       if (t < 0.5) {
-        _fadeOpacity = 1.0 - eased * 2.0;
+        final eased = _animateCurve.transform(t * 2.0);
+        _fadeOpacity = (1.0 - eased).clamp(0.0, 1.0);
       } else {
         if (!_farAnimateJumped) {
           _farAnimateJumped = true;
           _controller.jumpTo(_animateTargetId);
         }
-        _fadeOpacity = (eased * 2.0 - 1.0).clamp(0.0, 1.0);
+        final eased = _animateCurve.transform((t - 0.5) * 2.0);
+        _fadeOpacity = eased.clamp(0.0, 1.0);
       }
       if (t >= 1.0) {
         _fadeOpacity = 1.0;
