@@ -10,9 +10,11 @@ import 'package:flutter/widgets.dart';
 ///   Tune to your typical message-row height — this is not derived from
 ///   text-line metrics.
 /// * `PageUp` / `PageDown` — scroll by [pageExtent]; when `null`, falls back
-///   to `MediaQuery.sizeOf(context).height * pageFraction` so the page step
-///   roughly matches the viewport height. The `MediaQuery` is read *when
-///   the key fires*, not on every rebuild.
+///   to the wrapper's *own* measured height (via an internal `LayoutBuilder`)
+///   times [pageFraction], so the page step matches the actual chat viewport
+///   even when the wrapper sits under an `AppBar` / next to a side panel.
+///   The latest measurement is captured each rebuild — keys fired before
+///   the first layout fall back to the ambient `MediaQuery` height.
 /// * `Home` — `controller.jumpTo(dataSource.oldestKnownId)`. No-op when the
 ///   oldest is unknown (initial load).
 /// * `End` — `controller.jumpTo(dataSource.newestKnownId)`.
@@ -75,8 +77,10 @@ class ChatKeyboardShortcuts extends StatefulWidget {
   /// tune to your typical row height. Not derived from text-line metrics.
   final double lineExtent;
 
-  /// Pixel step for PageUp / PageDown. `null` derives the step from
-  /// `MediaQuery.sizeOf(context).height * pageFraction` at key-fire time.
+  /// Pixel step for PageUp / PageDown. `null` derives the step from the
+  /// wrapper's measured height × [pageFraction] at key-fire time (falling
+  /// back to `MediaQuery.sizeOf(context).height` only before the first
+  /// layout has produced a measurement).
   final double? pageExtent;
 
   /// Fraction of the viewport height to use as the page step when
@@ -95,6 +99,12 @@ class ChatKeyboardShortcuts extends StatefulWidget {
 
 class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
   late final FocusNode _focusNode;
+
+  /// Latest height the `LayoutBuilder` reported for the wrapped subtree —
+  /// the actual viewport size, not the full screen. `null` until the first
+  /// layout has produced a finite measurement (e.g. before mount completes
+  /// or inside an unbounded ancestor).
+  double? _viewportHeight;
 
   /// Static shortcut map — `const`-promotable so the framework can compare
   /// by identity across rebuilds rather than reallocating per frame.
@@ -156,8 +166,13 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
 
   Object? _onScrollPage(int sign) {
     final pageExtent = widget.pageExtent;
-    final step = pageExtent ??
-        MediaQuery.sizeOf(context).height * widget.pageFraction;
+    // Viewport-relative default: the wrapper's measured height (captured
+    // by the `LayoutBuilder` below). Falls back to the ambient `MediaQuery`
+    // only if a key fires before the first layout — covers a stray pre-
+    // layout invocation rather than the steady-state default. `pageFraction`
+    // keeps a small overlap between pages.
+    final viewport = _viewportHeight ?? MediaQuery.sizeOf(context).height;
+    final step = pageExtent ?? viewport * widget.pageFraction;
     widget.controller.scrollBy(step * sign);
     return null;
   }
@@ -220,7 +235,21 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
         child: Listener(
           behavior: HitTestBehavior.translucent,
           onPointerDown: _handlePointerDown,
-          child: widget.child,
+          // `LayoutBuilder` captures the wrapper's actual height so PageUp /
+          // PageDown step against the chat viewport rather than the full
+          // screen (the previous `MediaQuery.sizeOf(context).height` default
+          // overshot whenever the wrapper sat under an `AppBar`, above a
+          // composer, or inside a constrained pane). Reading from inside the
+          // builder is cheap — no per-frame allocation; the captured height
+          // is only consumed when a Page key actually fires.
+          child: LayoutBuilder(
+            builder: (ctx, constraints) {
+              if (constraints.hasBoundedHeight) {
+                _viewportHeight = constraints.maxHeight;
+              }
+              return widget.child;
+            },
+          ),
         ),
       ),
     ),

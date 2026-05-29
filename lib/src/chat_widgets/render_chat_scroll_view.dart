@@ -402,9 +402,19 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// Spring-back animation state. When the user releases while
   /// overscrolled, the viewport drives the anchor offset back to the
   /// boundary edge over `_kOverscrollBounceDuration` with linear interp.
+  ///
+  /// The boundary side is captured at start (`_bouncebackSide`) and frozen
+  /// for the duration of the animation; per-tick measurements read *only*
+  /// that side. The `_signedOverscroll()` helper picks the dominant
+  /// violator when both edges are past, which can flip sign mid-animation
+  /// in a short-content viewport (e.g. a fling damps the dominant side and
+  /// the lesser one becomes dominant, or the bounceback itself overshoots
+  /// through the opposite edge). Without the side lock the per-tick delta
+  /// would change direction and the spring would judder / fight itself.
   bool _bouncebackActive = false;
   Duration? _bouncebackStartTime;
   double _bouncebackInitialOverscroll = 0.0;
+  _BouncebackSide _bouncebackSide = _BouncebackSide.top;
   static const Duration _kOverscrollBounceDuration =
       Duration(milliseconds: 200);
 
@@ -1278,31 +1288,40 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// violated, returns the larger-magnitude violation so the bounceback
   /// pulls toward the dominant side.
   double _signedOverscroll() {
-    double topOverscroll = 0.0;
-    double bottomOverscroll = 0.0;
-    final oldest = _dataSource.oldestKnownId;
-    if (_dataSource.reachedOldest && oldest != null) {
-      final first = _boundaryBox(oldest);
-      if (first != null) {
+    final top = _overscrollOnSide(_BouncebackSide.top);
+    final bottom = _overscrollOnSide(_BouncebackSide.bottom);
+    if (top == 0.0) return bottom;
+    if (bottom == 0.0) return top;
+    // Both violated — return the dominant side.
+    return top.abs() >= bottom.abs() ? top : bottom;
+  }
+
+  /// Signed overscroll for a *specific* side, ignoring the opposite side.
+  /// Used by `_tickBounceback` so the spring-back animation stays locked
+  /// onto the boundary it started from, even when fling composition or
+  /// dual-boundary geometry would flip the dominant violator mid-animation.
+  ///
+  /// Positive top-side return = oldest below top edge; negative bottom-side
+  /// return = newest above bottom edge. Zero when the requested side is
+  /// inside its boundary or no boundary is configured on that side.
+  double _overscrollOnSide(_BouncebackSide side) {
+    switch (side) {
+      case _BouncebackSide.top:
+        final oldest = _dataSource.oldestKnownId;
+        if (!_dataSource.reachedOldest || oldest == null) return 0.0;
+        final first = _boundaryBox(oldest);
+        if (first == null) return 0.0;
         final topY = _parentData(first).offset;
-        if (topY > 0) topOverscroll = topY;
-      }
-    }
-    final newest = _dataSource.newestKnownId;
-    if (_dataSource.reachedNewest && newest != null) {
-      final last = _boundaryBox(newest);
-      if (last != null) {
+        return topY > 0 ? topY : 0.0;
+      case _BouncebackSide.bottom:
+        final newest = _dataSource.newestKnownId;
+        if (!_dataSource.reachedNewest || newest == null) return 0.0;
+        final last = _boundaryBox(newest);
+        if (last == null) return 0.0;
         final bottom = _parentData(last).offset + last.size.height;
         final bottomEdge = size.height - _bottomPad;
-        if (bottom < bottomEdge) bottomOverscroll = bottom - bottomEdge;
-      }
+        return bottom < bottomEdge ? bottom - bottomEdge : 0.0;
     }
-    if (topOverscroll == 0.0) return bottomOverscroll;
-    if (bottomOverscroll == 0.0) return topOverscroll;
-    // Both violated — return the dominant side.
-    return topOverscroll.abs() >= bottomOverscroll.abs()
-        ? topOverscroll
-        : bottomOverscroll;
   }
 
   /// Damp [delta] when it would push the anchor further past a boundary —
@@ -2066,18 +2085,44 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// If the viewport is currently overscrolled, arm a spring-back
   /// animation that pulls the boundary back to its edge across
   /// [_kOverscrollBounceDuration]. No-op when nothing is past a boundary.
+  ///
+  /// Locks onto the dominant violator's side and uses *only* that side's
+  /// overscroll for the duration of the animation. When both boundaries
+  /// are violated (short-content viewport with aggressive drag) the lesser
+  /// side stays in its post-release position until the dominant spring-back
+  /// finishes — `_clampBoundaries` then snaps the residual on the first
+  /// post-bounceback layout. The alternative (running two springs in
+  /// parallel) compounds delta and fights itself in the symmetric case.
   void _maybeStartBounceback() {
-    final overscroll = _signedOverscroll();
-    if (overscroll == 0.0) return;
+    final top = _overscrollOnSide(_BouncebackSide.top);
+    final bottom = _overscrollOnSide(_BouncebackSide.bottom);
+    if (top == 0.0 && bottom == 0.0) return;
+    final _BouncebackSide side;
+    final double initial;
+    if (top.abs() >= bottom.abs()) {
+      side = _BouncebackSide.top;
+      initial = top;
+    } else {
+      side = _BouncebackSide.bottom;
+      initial = bottom;
+    }
     _bouncebackActive = true;
     _bouncebackStartTime = null;
-    _bouncebackInitialOverscroll = overscroll;
+    _bouncebackInitialOverscroll = initial;
+    _bouncebackSide = side;
     _ensureTicker();
   }
 
   /// Drive one tick of the bounceback animation. Returns the scroll delta
   /// to feed into `applyScrollDelta`; clears `_bouncebackActive` once the
   /// animation has fully settled the anchor back against the boundary.
+  ///
+  /// Reads overscroll on the *locked* side only. A naive read of
+  /// `_signedOverscroll()` would flip sign whenever the dominant boundary
+  /// switched mid-animation (e.g. the spring overshoots through zero and
+  /// past the opposite edge, or a composed fling damps one side faster
+  /// than the other), driving the delta in the wrong direction for the
+  /// remainder of the window — visible as judder or a stuck spring.
   double _tickBounceback(Duration elapsed) {
     if (!_bouncebackActive) return 0.0;
     final start = _bouncebackStartTime ??= elapsed;
@@ -2088,7 +2133,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // need to push the anchor (negative when past top, positive when past
     // bottom — opposite of the overscroll's sign).
     final remainingTarget = _bouncebackInitialOverscroll * (1.0 - t);
-    final currentOverscroll = _signedOverscroll();
+    final currentOverscroll = _overscrollOnSide(_bouncebackSide);
     // Move from current → remainingTarget by emitting (target - current).
     // `applyScrollDelta(+px)` shifts the anchor down (reveals older); that
     // *increases* topY (positive overscroll). To shrink positive overscroll
@@ -2577,3 +2622,9 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     super.dispose();
   }
 }
+
+/// Which boundary the bounceback spring is anchored to. Captured at start of
+/// `_maybeStartBounceback`; per-tick reads stay locked to this side so the
+/// delta does not flip sign when the dominant violator switches (short-
+/// content viewport, fling composition).
+enum _BouncebackSide { top, bottom }

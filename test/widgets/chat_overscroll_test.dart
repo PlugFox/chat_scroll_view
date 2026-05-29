@@ -225,5 +225,57 @@ void main() {
       final firstBoxTop = tester.getTopLeft(find.text('msg-0'));
       expect(firstBoxTop.dy, closeTo(viewportTopLeft.dy, 0.5));
     });
+
+    testWidgets(
+      'short-content (both boundaries violatable) bounceback settles cleanly',
+      (tester) async {
+        // Regression: `_signedOverscroll()` picks the dominant violator
+        // each tick. In a viewport where both boundaries can be past
+        // simultaneously, the dominant side could flip mid-bounceback
+        // (e.g. the spring overshoots through the opposite edge) and the
+        // delta sign would flip with it — visible as judder, possibly a
+        // stuck spring. The fix locks the bounceback side at start.
+        //
+        // Setup: 3 messages × 60px in a 600px viewport. The entire
+        // conversation occupies 180px — both top and bottom edges are
+        // always within reach.
+        const count = 3;
+        final controller = ChatScrollController()..jumpTo(0);
+        final ds = _PreloadedDataSource(count);
+        addTearDown(controller.dispose);
+        addTearDown(ds.dispose);
+
+        await tester.pumpWidget(_scaffold(
+          dataSource: ds,
+          controller: controller,
+        ));
+        await tester.pumpAndSettle();
+
+        // Drag the content down 250 px — past the top boundary by a lot,
+        // while the small content (180 px) means the bottom boundary's
+        // overscroll is also live in the opposite direction.
+        await _slowDragPast(
+          tester,
+          const Offset(0, 250),
+          steps: 10,
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+        // Drive bounceback to completion. Without the side-lock fix the
+        // delta would change sign as the dominant violator switched.
+        await tester.pumpAndSettle();
+
+        // End-state: regardless of which side won, the dominant
+        // boundary is pinned to its edge and the lesser side will have
+        // been clamped on the post-bounceback layout.
+        final viewportTopLeft = tester.getTopLeft(find.byType(ChatScrollView));
+        final firstBoxTop = tester.getTopLeft(find.text('msg-0'));
+        // `pumpAndSettle` returned — proves the bounceback terminated
+        // (a sign-flip oscillation would either never settle, or settle
+        // off-edge by more than a hair).
+        expect(firstBoxTop.dy, closeTo(viewportTopLeft.dy, 1.0),
+            reason: 'short-content bounceback must end with oldest pinned '
+                'to the top edge.');
+      },
+    );
   });
 }

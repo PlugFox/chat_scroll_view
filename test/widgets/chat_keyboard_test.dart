@@ -132,6 +132,72 @@ void main() {
       expect(controller.anchorPixelOffset, closeTo(offsetBefore, 0.5));
     });
 
+    testWidgets(
+      'PageUp default step is viewport-relative, not screen-relative',
+      (tester) async {
+        // Regression for Copilot #10: the default step used to be
+        // `MediaQuery.sizeOf(context).height * pageFraction`, which read the
+        // full screen height instead of the actual chat viewport. Wrapping
+        // the chat in a constrained box (mimicking a layout with an
+        // AppBar / composer / split pane) must produce a smaller page step.
+        const count = 256;
+        const wrapperHeight = 300.0; // ½ the previous test's viewport
+        final controller = ChatScrollController()..jumpTo(count ~/ 2);
+        final ds = _PreloadedDataSource(count);
+        addTearDown(controller.dispose);
+        addTearDown(ds.dispose);
+
+        await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            // Force the *screen* to be larger than the wrapper — if the
+            // implementation reads MediaQuery, the step matches the screen.
+            // If it reads the LayoutBuilder height, the step matches the
+            // 300px wrapper.
+            body: Center(
+              child: SizedBox(
+                width: 400,
+                height: wrapperHeight,
+                child: ChatKeyboardShortcuts(
+                  controller: controller,
+                  dataSource: ds,
+                  autofocus: true,
+                  child: ChatScrollView(
+                    dataSource: ds,
+                    controller: controller,
+                    cacheExtent: 1000,
+                    messageBuilder: (context, id, message, status) => SizedBox(
+                      height: 60,
+                      child: Text(message == null ? 'shimmer-$id' : 'msg-$id'),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ));
+        await tester.pumpAndSettle();
+
+        // Screen is ~800px tall by default in the test harness; wrapper is
+        // 300. Expected page step = 300 * 0.85 = 255. The old (broken)
+        // implementation would scroll by ~screenHeight * 0.85 = ~680.
+        final offsetBefore = controller.anchorPixelOffset;
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+        await tester.pumpAndSettle();
+        final delta = (offsetBefore - controller.anchorPixelOffset).abs();
+        expect(
+          delta,
+          closeTo(wrapperHeight * 0.85, 1.0),
+          reason: 'PageDown default must derive from the wrapper height '
+              '(300 * 0.85 = 255), not the full MediaQuery height.',
+        );
+        expect(
+          delta,
+          lessThan(400),
+          reason: 'A screen-height-based step would land above 600 px.',
+        );
+      },
+    );
+
     testWidgets('Home jumps to oldestKnownId', (tester) async {
       const count = 256;
       final controller = ChatScrollController()..jumpTo(count ~/ 2);

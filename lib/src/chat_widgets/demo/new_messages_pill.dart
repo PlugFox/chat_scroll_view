@@ -54,6 +54,11 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
     // messages have arrived. Seeding here treats "everything that exists
     // now" as already-seen, which is the correct baseline regardless of
     // anchor position.
+    //
+    // If the source is currently empty (`newestKnownId == null`) the seed
+    // stays null — the first non-null arrival on a *non-tail* anchor is
+    // promoted in `_onBoundaryChanged` so the pill can surface those
+    // messages instead of being silently suppressed forever.
     _lastSeenNewestId = widget.dataSource.newestKnownId;
   }
 
@@ -90,6 +95,7 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
   }
 
   void _onBoundaryChanged() {
+    final newest = widget.dataSource.newestKnownId;
     // When new messages arrive while the user is already pinned at the
     // tail, the follow-tail layout auto-scrolls them into view — they
     // are *visible*, not unseen. `isAtTail` stays `true` across that
@@ -97,7 +103,18 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
     // snapshot the next time the user scrolls away the pill would count
     // those already-viewed messages as "new".
     if (widget.controller.isAtTail.value) {
-      _lastSeenNewestId = widget.dataSource.newestKnownId;
+      _lastSeenNewestId = newest;
+    } else if (_lastSeenNewestId == null && newest != null) {
+      // Promote a never-seeded baseline: the pill mounted while the source
+      // was still empty (initial loading / permalink to a not-yet-loaded
+      // anchor) and the first non-null id has now arrived off-tail. Seed to
+      // `newest - 1` so the just-arrived id counts as one unseen and the
+      // pill surfaces; without this the pill would stay silently hidden
+      // forever (`_unseenCount` short-circuits on `lastSeen == null`).
+      // The count for a bulk first-arrival is intentionally lossy — what
+      // matters here is that the pill becomes *visible*; the consumer can
+      // tap it to jump and the counter resets cleanly afterwards.
+      _lastSeenNewestId = newest - 1;
     }
     _scheduleRebuild();
   }

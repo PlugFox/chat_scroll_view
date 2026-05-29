@@ -136,9 +136,14 @@ abstract class ChatDataSource {
 
   // --- Typed listener: boundary changed ---
 
-  final _boundaryListeners = <VoidCallback>[];
+  /// `LinkedHashSet` so a double-`addBoundaryListener` with the same closure
+  /// is a no-op (otherwise the listener fired twice per notification and the
+  /// symmetric `remove` only stripped one registration). Insertion order is
+  /// preserved so notification order is stable.
+  final _boundaryListeners = <VoidCallback>{};
 
-  /// Subscribe to boundary state changes.
+  /// Subscribe to boundary state changes. Adding the same callback twice is
+  /// a no-op — the registration is dedup'd.
   void addBoundaryListener(VoidCallback callback) =>
       _boundaryListeners.add(callback);
 
@@ -535,9 +540,11 @@ abstract class ChatDataSource {
 
   // --- Typed listener: data changed ---
 
-  final _dataListeners = <VoidCallback>[];
+  /// `LinkedHashSet` for the same reason as [_boundaryListeners]: duplicate
+  /// registrations dedup, removal is symmetric, iteration order is stable.
+  final _dataListeners = <VoidCallback>{};
 
-  /// Subscribe to data changes.
+  /// Subscribe to data changes. Adding the same callback twice is a no-op.
   void addDataListener(VoidCallback callback) => _dataListeners.add(callback);
 
   /// Unsubscribe from data changes.
