@@ -101,6 +101,7 @@ class ChatScrollView extends RenderObjectWidget {
     this.groupBy,
     this.highlightColor = const Color(0x402196F3),
     this.highlightDuration = const Duration(milliseconds: 1500),
+    this.textDirection,
     this.cacheExtent = 250.0,
     this.extraBuildExtent = 0.0,
     this.reverse = false,
@@ -212,6 +213,16 @@ class ChatScrollView extends RenderObjectWidget {
   /// `animateTo` calls land silently.
   final Duration highlightDuration;
 
+  /// Reading direction. `null` (the default) inherits from `Directionality`
+  /// of the build context — set explicitly to override (e.g. force LTR for
+  /// a specific chat thread inside an RTL app).
+  ///
+  /// Drives where the scrollbar paints (right in LTR, left in RTL) and where
+  /// its touch strip lives. The `messageBuilder` does not receive this value
+  /// — to mirror bubble alignment, read `Directionality.of(context)` inside
+  /// the builder.
+  final TextDirection? textDirection;
+
   /// Pixels above and below the viewport to keep built.
   final double cacheExtent;
 
@@ -245,6 +256,12 @@ class ChatScrollView extends RenderObjectWidget {
   @override
   RenderObjectElement createElement() => ChatScrollElement(this);
 
+  /// Effective reading direction: an explicit override wins; otherwise read
+  /// from `Directionality`, falling back to `TextDirection.ltr` only when
+  /// no `Directionality` ancestor is in scope.
+  TextDirection _resolveDirection(BuildContext context) =>
+      textDirection ?? Directionality.maybeOf(context) ?? TextDirection.ltr;
+
   @override
   RenderChatScrollView createRenderObject(BuildContext context) =>
       RenderChatScrollView(
@@ -262,6 +279,7 @@ class ChatScrollView extends RenderObjectWidget {
         hasLoadingBuilder: loadingBuilder != null,
         highlightColor: highlightColor,
         highlightDuration: highlightDuration,
+        textDirection: _resolveDirection(context),
       );
 
   @override
@@ -283,6 +301,7 @@ class ChatScrollView extends RenderObjectWidget {
       ..hasEmptyBuilder = emptyBuilder != null
       ..hasLoadingBuilder = loadingBuilder != null
       ..highlightColor = highlightColor
-      ..highlightDuration = highlightDuration;
+      ..highlightDuration = highlightDuration
+      ..textDirection = _resolveDirection(context);
   }
 }

@@ -24,13 +24,25 @@ class ChatScrollbar {
   /// Whether a scrollbar drag is currently in progress.
   bool get isDragging => _pointer != null;
 
-  /// Whether [localX] falls inside the right-edge touch strip.
-  bool inHitArea(double localX, Size size) => localX >= size.width - hitWidth;
+  /// Whether [localX] falls inside the trailing-edge touch strip. The strip
+  /// sits on the right in LTR and on the left in RTL — matching where the
+  /// user expects the scrollbar to be in their reading order.
+  bool inHitArea(
+    double localX,
+    Size size,
+    TextDirection direction,
+  ) => direction == TextDirection.rtl
+      ? localX <= hitWidth
+      : localX >= size.width - hitWidth;
 
   /// Begin a drag if [event] landed in the touch strip. Returns `true` when
   /// the drag was claimed (the caller should then consume the event).
-  bool tryStartDrag(PointerDownEvent event, Size size) {
-    if (!inHitArea(event.localPosition.dx, size)) return false;
+  bool tryStartDrag(
+    PointerDownEvent event,
+    Size size,
+    TextDirection direction,
+  ) {
+    if (!inHitArea(event.localPosition.dx, size, direction)) return false;
     _pointer = event.pointer;
     return true;
   }
@@ -53,10 +65,20 @@ class ChatScrollbar {
   final Paint _trackPaint = Paint()..color = const Color(0x1A000000);
   final Paint _thumbPaint = Paint();
 
-  /// Paint the track and thumb. [progress] is the 0..1 thumb position.
-  void paint(Canvas canvas, Offset offset, Size size, double progress) {
+  /// Paint the track and thumb. [progress] is the 0..1 thumb position;
+  /// [direction] places the track on the trailing edge (right in LTR, left
+  /// in RTL).
+  void paint(
+    Canvas canvas,
+    Offset offset,
+    Size size,
+    double progress,
+    TextDirection direction,
+  ) {
     final trackWidth = isDragging ? _activeTrackWidth : _trackWidth;
-    final trackX = offset.dx + size.width - _right - trackWidth;
+    final trackX = direction == TextDirection.rtl
+        ? offset.dx + _right
+        : offset.dx + size.width - _right - trackWidth;
     final trackY = offset.dy + _pad;
     final trackHeight = size.height - _pad * 2;
     if (trackHeight <= 0) return;

@@ -105,6 +105,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     bool hasLoadingBuilder = false,
     Color highlightColor = const Color(0x402196F3),
     Duration highlightDuration = const Duration(milliseconds: 1500),
+    TextDirection textDirection = TextDirection.ltr,
   }) : _dataSource = dataSource,
        _controller = controller,
        _cacheExtent = cacheExtent,
@@ -118,7 +119,8 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
        _hasEmptyBuilder = hasEmptyBuilder,
        _hasLoadingBuilder = hasLoadingBuilder,
        _highlightColor = highlightColor,
-       _highlightDuration = highlightDuration;
+       _highlightDuration = highlightDuration,
+       _textDirection = textDirection;
 
   /// Set by `ChatScrollElement` in `mount`. Drives lazy child inflation.
   ChatChildManager? childManager;
@@ -275,6 +277,16 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     if (_groupBy == value) return;
     _groupBy = value;
     markNeedsLayout();
+  }
+
+  /// Reading direction for paint mirroring (scrollbar position, future RTL
+  /// chrome). Hit-tests against the scrollbar's trailing-edge strip read
+  /// this too.
+  TextDirection _textDirection;
+  set textDirection(TextDirection value) {
+    if (_textDirection == value) return;
+    _textDirection = value;
+    markNeedsPaint();
   }
 
   /// Whether the host widget exposes a chunk-error builder — drives the
@@ -2009,7 +2021,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
 
     if (event is PointerDownEvent) {
       if (_dataSource.newestKnownId != null &&
-          _scrollbar.tryStartDrag(event, size)) {
+          _scrollbar.tryStartDrag(event, size, _textDirection)) {
         _cancelFling();
         markNeedsPaint();
         _jumpToScrollbar(
@@ -2414,7 +2426,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   void _paintScrollbar(PaintingContext context, Offset offset) {
     final progress = _scrollbarProgress();
     if (progress == null) return;
-    _scrollbar.paint(context.canvas, offset, size, progress);
+    _scrollbar.paint(context.canvas, offset, size, progress, _textDirection);
   }
 
   @override

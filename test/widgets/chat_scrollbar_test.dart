@@ -8,15 +8,28 @@ void main() {
   group('ChatScrollbar', () {
     const size = Size(400, 600);
 
-    test('hit area is the right-edge strip', () {
+    test('hit area is the right-edge strip in LTR', () {
       final sb = ChatScrollbar();
-      expect(sb.inHitArea(399, size), isTrue);
-      expect(sb.inHitArea(size.width - ChatScrollbar.hitWidth, size), isTrue);
+      const ltr = TextDirection.ltr;
+      expect(sb.inHitArea(399, size, ltr), isTrue);
       expect(
-        sb.inHitArea(size.width - ChatScrollbar.hitWidth - 1, size),
+        sb.inHitArea(size.width - ChatScrollbar.hitWidth, size, ltr),
+        isTrue,
+      );
+      expect(
+        sb.inHitArea(size.width - ChatScrollbar.hitWidth - 1, size, ltr),
         isFalse,
       );
-      expect(sb.inHitArea(0, size), isFalse);
+      expect(sb.inHitArea(0, size, ltr), isFalse);
+    });
+
+    test('hit area mirrors to the left-edge strip in RTL', () {
+      final sb = ChatScrollbar();
+      const rtl = TextDirection.rtl;
+      expect(sb.inHitArea(0, size, rtl), isTrue);
+      expect(sb.inHitArea(ChatScrollbar.hitWidth, size, rtl), isTrue);
+      expect(sb.inHitArea(ChatScrollbar.hitWidth + 1, size, rtl), isFalse);
+      expect(sb.inHitArea(size.width - 1, size, rtl), isFalse);
     });
 
     test('progressFromY spans the track 0..1 and clamps past the ends', () {
@@ -41,11 +54,12 @@ void main() {
       expect(sb.isDragging, isFalse);
 
       // A pointer-down inside the strip is claimed.
+      const ltr = TextDirection.ltr;
       final inside = PointerDownEvent(
         pointer: 7,
         position: Offset(size.width - 6, 100),
       );
-      expect(sb.tryStartDrag(inside, size), isTrue);
+      expect(sb.tryStartDrag(inside, size, ltr), isTrue);
       expect(sb.isDragging, isTrue);
       expect(sb.ownsPointer(const PointerMoveEvent(pointer: 7)), isTrue);
       expect(sb.ownsPointer(const PointerMoveEvent(pointer: 9)), isFalse);
@@ -58,7 +72,7 @@ void main() {
         pointer: 8,
         position: const Offset(10, 100),
       );
-      expect(sb.tryStartDrag(outside, size), isFalse);
+      expect(sb.tryStartDrag(outside, size, ltr), isFalse);
       expect(sb.isDragging, isFalse);
     });
   });
