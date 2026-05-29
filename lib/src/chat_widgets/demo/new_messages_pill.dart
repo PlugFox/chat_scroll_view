@@ -2,6 +2,7 @@ import 'package:chatscrollview/src/chat_scroll/chat_data_source.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_controller.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 /// A floating "↓ N new" pill that surfaces when:
 ///
@@ -85,7 +86,7 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
       // so subsequent arrivals start the counter from zero.
       _lastSeenNewestId = widget.dataSource.newestKnownId;
     }
-    setState(() {});
+    _scheduleRebuild();
   }
 
   void _onBoundaryChanged() {
@@ -98,7 +99,21 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
     if (widget.controller.isAtTail.value) {
       _lastSeenNewestId = widget.dataSource.newestKnownId;
     }
-    setState(() {});
+    _scheduleRebuild();
+  }
+
+  // The controller pushes `isAtTail` from inside `performLayout`, so the
+  // listener fires during the `persistentCallbacks` phase where `setState`
+  // is illegal. Defer the rebuild to the end of the frame in that case.
+  void _scheduleRebuild() {
+    final binding = SchedulerBinding.instance;
+    if (binding.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      binding.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      setState(() {});
+    }
   }
 
   int _unseenCount() {
