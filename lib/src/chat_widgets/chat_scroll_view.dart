@@ -99,6 +99,8 @@ class ChatScrollView extends RenderObjectWidget {
     this.topPadding,
     this.dateSeparatorBuilder,
     this.groupBy,
+    this.highlightColor = const Color(0x402196F3),
+    this.highlightDuration = const Duration(milliseconds: 1500),
     this.cacheExtent = 250.0,
     this.extraBuildExtent = 0.0,
     this.reverse = false,
@@ -199,6 +201,17 @@ class ChatScrollView extends RenderObjectWidget {
   /// reference.
   final Object Function(IChatMessage message)? groupBy;
 
+  /// Peak colour of the fade-out highlight painted over a message that just
+  /// became the target of [ChatScrollController.animateTo]. Alpha drives the
+  /// initial opacity; set the alpha channel to 0 to opt out without changing
+  /// [highlightDuration].
+  final Color highlightColor;
+
+  /// How long the post-animate highlight stays on the target before fully
+  /// fading out. [Duration.zero] disables the feature entirely — successful
+  /// `animateTo` calls land silently.
+  final Duration highlightDuration;
+
   /// Pixels above and below the viewport to keep built.
   final double cacheExtent;
 
@@ -247,6 +260,8 @@ class ChatScrollView extends RenderObjectWidget {
         hasErrorBuilder: chunkErrorBuilder != null,
         hasEmptyBuilder: emptyBuilder != null,
         hasLoadingBuilder: loadingBuilder != null,
+        highlightColor: highlightColor,
+        highlightDuration: highlightDuration,
       );
 
   @override
@@ -266,6 +281,8 @@ class ChatScrollView extends RenderObjectWidget {
       ..groupBy = _effectiveGroupBy
       ..hasErrorBuilder = chunkErrorBuilder != null
       ..hasEmptyBuilder = emptyBuilder != null
-      ..hasLoadingBuilder = loadingBuilder != null;
+      ..hasLoadingBuilder = loadingBuilder != null
+      ..highlightColor = highlightColor
+      ..highlightDuration = highlightDuration;
   }
 }

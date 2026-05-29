@@ -103,6 +103,8 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     bool hasErrorBuilder = false,
     bool hasEmptyBuilder = false,
     bool hasLoadingBuilder = false,
+    Color highlightColor = const Color(0x402196F3),
+    Duration highlightDuration = const Duration(milliseconds: 1500),
   }) : _dataSource = dataSource,
        _controller = controller,
        _cacheExtent = cacheExtent,
@@ -114,7 +116,9 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
        _groupBy = groupBy,
        _hasErrorBuilder = hasErrorBuilder,
        _hasEmptyBuilder = hasEmptyBuilder,
-       _hasLoadingBuilder = hasLoadingBuilder;
+       _hasLoadingBuilder = hasLoadingBuilder,
+       _highlightColor = highlightColor,
+       _highlightDuration = highlightDuration;
 
   /// Set by `ChatScrollElement` in `mount`. Drives lazy child inflation.
   ChatChildManager? childManager;
@@ -362,6 +366,39 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   double _fadeOpacity = 1.0;
   final LayerHandle<OpacityLayer> _fadeLayer = LayerHandle<OpacityLayer>();
 
+  // --- animateTo target-highlight ------------------------------------------
+
+  /// Message id receiving the post-animate fade-out tint, or `null` when no
+  /// highlight is active.
+  int? _highlightTargetId;
+
+  /// Ticker time at the start of the active highlight; combined with
+  /// [_highlightDuration] this drives the per-frame opacity.
+  Duration? _highlightStartTime;
+
+  /// Current opacity factor (0..1) of the highlight; 1 at the start, 0 at
+  /// the end. Updated by `_highlightProgress` each tick; read by
+  /// `_paintHighlight` so paint never has to look at ticker state.
+  double _highlightFactor = 0.0;
+
+  /// Configurable: how long the post-animate highlight stays on the target.
+  /// Zero disables the highlight entirely.
+  Duration _highlightDuration;
+  set highlightDuration(Duration value) {
+    if (_highlightDuration == value) return;
+    _highlightDuration = value;
+    if (_highlightTargetId != null) markNeedsPaint();
+  }
+
+  /// Configurable: peak colour of the highlight overlay. Faded to fully
+  /// transparent over [_highlightDuration].
+  Color _highlightColor;
+  set highlightColor(Color value) {
+    if (_highlightColor == value) return;
+    _highlightColor = value;
+    if (_highlightTargetId != null) markNeedsPaint();
+  }
+
   // --- Fetch poll ------------------------------------------------------------
 
   static const Duration _pollInterval = Duration(milliseconds: 150);
@@ -448,6 +485,8 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   double? get debugFloatingHeaderOffset =>
       _floatingHeader == null ? null : _parentData(_floatingHeader!).offset;
   DateTime? get debugHeaderDate => _headerDate;
+  int? get debugHighlightTargetId => _highlightTargetId;
+  double get debugHighlightFactor => _highlightFactor;
 
   /// Inline-divider fade opacity (0..1) of the built child [id], or `null`
   /// when [id] is not currently built.
@@ -1367,7 +1406,10 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   }
 
   void _stopTickerIfIdle() {
-    if (_simulation == null && _pendingScrollDelta == 0.0) {
+    if (_simulation == null &&
+        _pendingScrollDelta == 0.0 &&
+        _highlightTargetId == null &&
+        _animateCompleter == null) {
       _ticker?.stop();
       // Scroll ended — drop the directional lead so the next layout re-fans
       // a symmetric range and collects the now-unneeded lead children.
@@ -1405,7 +1447,11 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     required Duration duration,
     required Curve curve,
   }) {
-    // Re-entrant animateTo: cancel the in-flight one, schedule the new one.
+    // Re-entrant animateTo: cancel the in-flight one, schedule the new
+    // one, and drop any leftover highlight — the user expects the new
+    // target to own the attention. Other cancellers (drag, clamp, …) leave
+    // the highlight running on purpose: it's a fade, not a focus lock.
+    _clearHighlight();
     _cancelAnimate();
     if (duration <= Duration.zero) {
       _controller.jumpTo(targetId);
@@ -1519,11 +1565,52 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
 
   void _completeAnimate() {
     final completer = _animateCompleter;
+    final targetId = _animateTargetId;
     _animateCompleter = null;
     _animateStartTime = null;
     _farAnimateActive = false;
     _farAnimateJumped = false;
+    // Successful settle (close-path reached t == 1 or far-path completed
+    // its jumpTo + fade-in) → kick off the target highlight. Cancel
+    // (`_cancelAnimate`) skips this path, so an interrupted animateTo
+    // leaves no leftover tint.
+    if (_highlightDuration > Duration.zero) {
+      _highlightTargetId = targetId;
+      _highlightStartTime = null;
+      _highlightFactor = 1.0;
+      _ensureTicker();
+      markNeedsPaint();
+    }
     if (completer != null && !completer.isCompleted) completer.complete();
+  }
+
+  /// Advance the highlight fade by one tick. Returns `true` when the
+  /// highlight is still active after the update; `false` once it has ended
+  /// (in which case state has been cleared).
+  bool _highlightProgress(Duration elapsed) {
+    if (_highlightTargetId == null) return false;
+    final start = _highlightStartTime ??= elapsed;
+    final dt = elapsed - start;
+    final totalUs = _highlightDuration.inMicroseconds;
+    if (totalUs <= 0) {
+      _clearHighlight();
+      return false;
+    }
+    final t = (dt.inMicroseconds / totalUs).clamp(0.0, 1.0);
+    if (t >= 1.0) {
+      _clearHighlight();
+      return false;
+    }
+    _highlightFactor = 1.0 - t;
+    return true;
+  }
+
+  void _clearHighlight() {
+    if (_highlightTargetId == null) return;
+    _highlightTargetId = null;
+    _highlightStartTime = null;
+    _highlightFactor = 0.0;
+    markNeedsPaint();
   }
 
   /// Ticker callback — the entire scroll path. Bypasses layout: repositions
@@ -1537,9 +1624,23 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       _pendingScrollDelta = 0.0;
       _cancelFling();
       _cancelAnimate();
+      _clearHighlight();
       _ticker?.stop();
       return;
     }
+
+    // Skip the scroll path entirely on highlight-only frames so the fetch
+    // poll's debounce isn't constantly reset by `_markScrollActive`.
+    final hasScrollWork = _pendingScrollDelta != 0.0 ||
+        _simulation != null ||
+        _animateCompleter != null;
+    if (!hasScrollWork) {
+      // Highlight-only frame: advance the fade and bail.
+      if (_highlightProgress(elapsed)) markNeedsPaint();
+      if (_highlightTargetId == null) _stopTickerIfIdle();
+      return;
+    }
+
     _markScrollActive();
     var delta = _pendingScrollDelta;
     _pendingScrollDelta = 0.0;
@@ -1580,13 +1681,21 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // rebuild its text.
     final headerDayChanged = _tickFloatingHeader();
 
+    // The highlight runs alongside scroll/animate frames — advance it on
+    // every tick where the scroll path also ran.
+    _highlightProgress(elapsed);
+
     if (_rangeNoLongerCovers() || headerDayChanged) {
       markNeedsLayout();
     } else {
       markNeedsPaint();
     }
 
-    if (_simulation == null && _animateCompleter == null) _stopTickerIfIdle();
+    if (_simulation == null &&
+        _animateCompleter == null &&
+        _highlightTargetId == null) {
+      _stopTickerIfIdle();
+    }
   }
 
   /// Whether the built child range no longer covers viewport + cache extent.
@@ -2111,6 +2220,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       }
       context.paintChild(child, offset + Offset(0, pd.offset));
     }
+    _paintHighlight(context, offset, viewportHeight);
     // The floating day header — above the messages, below the scrollbar.
     final header = _floatingHeader;
     if (header != null) {
@@ -2120,6 +2230,38 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       );
     }
     _paintScrollbar(context, offset);
+  }
+
+  /// Translucent tint over the message that was the target of the last
+  /// successful `animateTo`. Fades from full to 0 over [_highlightDuration].
+  /// Painted *over* messages and chunk-error tiles but *under* the floating
+  /// day header and scrollbar, so chrome stays on top.
+  void _paintHighlight(
+    PaintingContext context,
+    Offset offset,
+    double viewportHeight,
+  ) {
+    final targetId = _highlightTargetId;
+    if (targetId == null) return;
+    final factor = _highlightFactor;
+    if (factor <= 0.0) return;
+    final target = _children[targetId];
+    if (target == null) return; // user scrolled the target out of the build
+    final pd = _parentData(target);
+    if (pd.offset >= viewportHeight || pd.offset + target.size.height <= 0) {
+      return;
+    }
+    final base = _highlightColor;
+    final alpha = (base.a * factor).clamp(0.0, 1.0);
+    if (alpha <= 0.0) return;
+    final paint = Paint()..color = base.withValues(alpha: alpha);
+    final rect = Rect.fromLTWH(
+      offset.dx,
+      offset.dy + pd.offset,
+      size.width,
+      target.size.height,
+    );
+    context.canvas.drawRect(rect, paint);
   }
 
   void _paintScrollbar(PaintingContext context, Offset offset) {
@@ -2132,6 +2274,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   void dispose() {
     _cancelFling();
     _cancelAnimate();
+    _clearHighlight();
     _ticker?.dispose();
     _ticker = null;
     _pollTimer?.cancel();
