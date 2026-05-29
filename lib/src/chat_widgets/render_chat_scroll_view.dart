@@ -165,6 +165,16 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     if (identical(_controller, value)) return;
     if (attached) {
       _cancelAnimate();
+      _cancelBounceback();
+      // Mid-drag controller swap: the new controller would otherwise see
+      // `_dragInProgress=true` with no matching `ChatUserDragStart`, and
+      // the next layout's `_clampBoundaries` would stay suspended.
+      _dragInProgress = false;
+      _pendingScrollDelta = 0.0;
+      if (_drag != null) {
+        _drag!.dispose();
+        _drag = _buildDragRecognizer();
+      }
       _controller
         ..removeJumpListener(_onJump)
         ..removeScrollByListener(_onScrollBy)
@@ -608,11 +618,22 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       ..animator = this;
     _bottomPadding?.addListener(_onBottomPaddingChanged);
     _topPadding?.addListener(_onTopPaddingChanged);
-    _drag = VerticalDragGestureRecognizer()
-      ..onStart = _onDragStart
-      ..onUpdate = _onDragUpdate
-      ..onEnd = _onDragEnd;
+    _drag = _buildDragRecognizer();
   }
+
+  /// Build a new drag recognizer. `onCancel` is intentionally NOT wired:
+  /// `VerticalDragGestureRecognizer` fires `onCancel` whenever the gesture
+  /// arena resolves against it (e.g. a child `TextButton` wins the arena on
+  /// tap). In that case `onStart` never fired, so there is nothing to
+  /// clean up — and a spurious `_dragInProgress=false` write here would
+  /// race with overlay-mode entry. The mid-drag-cancelled-pointer case
+  /// (rare in chat UIs) is handled by overlay entry, controller swap, and
+  /// the per-frame `_clampBoundaries` guard.
+  VerticalDragGestureRecognizer _buildDragRecognizer() =>
+      VerticalDragGestureRecognizer()
+        ..onStart = _onDragStart
+        ..onUpdate = _onDragUpdate
+        ..onEnd = _onDragEnd;
 
   @override
   void detach() {
@@ -700,12 +721,21 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
 
   void _onJump(int messageId) {
     _cancelFling();
+    // A leftover highlight points at a target id that may no longer be
+    // built (`jumpTo` repositioned the anchor). The ticker would keep
+    // running an invisible fade against the old slot — drop it.
+    _clearHighlight();
+    _cancelBounceback();
     markNeedsLayout();
   }
 
   void _onScrollBy(double delta) {
     _cancelFling();
     _cancelAnimate();
+    // Programmatic scroll is explicit user intent — it should win over a
+    // passive spring-back. Otherwise the bounceback keeps pulling against
+    // the new anchor offset for the rest of its window.
+    _cancelBounceback();
     markNeedsLayout();
   }
 
@@ -908,6 +938,12 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _pendingScrollDelta = 0.0;
     _cancelFling();
     _cancelAnimate();
+    // Clear drag + bounceback state so that the next normal-mode layout's
+    // `_clampBoundaries` is not silently suppressed by stale flags. The
+    // ticker is about to stop, so the overlay branch of `_onTick` can no
+    // longer reset them.
+    _dragInProgress = false;
+    _cancelBounceback();
     // An active drag survives a hit-test entry if the gesture arena already
     // assigned the pointer to our recognizer. handleEvent's overlay-mode
     // guard only blocks *new* pointers — the recognizer will keep dispatching
@@ -916,10 +952,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // tracking without affecting future drag setup in normal mode.
     if (_drag != null) {
       _drag!.dispose();
-      _drag = VerticalDragGestureRecognizer()
-        ..onStart = _onDragStart
-        ..onUpdate = _onDragUpdate
-        ..onEnd = _onDragEnd;
+      _drag = _buildDragRecognizer();
     }
     _ticker?.stop();
     _evictChunks();
@@ -1195,13 +1228,19 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// has been pulled *above* the bottom edge (past the bottom). Zero means
   /// no boundary is being violated. Reads `_boundaryBox`, so chunk-error
   /// tiles count as boundaries too.
+  ///
+  /// When the conversation fits inside the viewport and both boundaries are
+  /// violated, returns the larger-magnitude violation so the bounceback
+  /// pulls toward the dominant side.
   double _signedOverscroll() {
+    double topOverscroll = 0.0;
+    double bottomOverscroll = 0.0;
     final oldest = _dataSource.oldestKnownId;
     if (_dataSource.reachedOldest && oldest != null) {
       final first = _boundaryBox(oldest);
       if (first != null) {
         final topY = _parentData(first).offset;
-        if (topY > 0) return topY;
+        if (topY > 0) topOverscroll = topY;
       }
     }
     final newest = _dataSource.newestKnownId;
@@ -1210,10 +1249,15 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       if (last != null) {
         final bottom = _parentData(last).offset + last.size.height;
         final bottomEdge = size.height - _bottomPad;
-        if (bottom < bottomEdge) return bottom - bottomEdge; // negative
+        if (bottom < bottomEdge) bottomOverscroll = bottom - bottomEdge;
       }
     }
-    return 0.0;
+    if (topOverscroll == 0.0) return bottomOverscroll;
+    if (bottomOverscroll == 0.0) return topOverscroll;
+    // Both violated — return the dominant side.
+    return topOverscroll.abs() >= bottomOverscroll.abs()
+        ? topOverscroll
+        : bottomOverscroll;
   }
 
   /// Damp [delta] when it would push the anchor further past a boundary —
@@ -1547,8 +1591,10 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // one, and drop any leftover highlight — the user expects the new
     // target to own the attention. Other cancellers (drag, clamp, …) leave
     // the highlight running on purpose: it's a fade, not a focus lock.
+    // Also cancel any spring-back so the new animation owns the anchor.
     _clearHighlight();
     _cancelAnimate();
+    _cancelBounceback();
     if (duration <= Duration.zero) {
       _controller.jumpTo(targetId);
       return Future<void>.value();
@@ -1721,8 +1767,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       _cancelFling();
       _cancelAnimate();
       _clearHighlight();
-      _bouncebackActive = false;
-      _bouncebackStartTime = null;
+      _cancelBounceback();
       _dragInProgress = false;
       _ticker?.stop();
       return;
@@ -1748,8 +1793,11 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // While the user is dragging, scale incoming delta by the boundary
     // resistance so pulling further past the edge gets progressively
     // harder. Fling / animate / wheel / keyboard skip this — they go
-    // through the normal clamp instead.
-    if (_dragInProgress) {
+    // through the normal clamp instead. The `reached*` gate elides the
+    // per-tick `_signedOverscroll` walk on the dominant case where the
+    // user is dragging mid-conversation with no boundary in sight.
+    if (_dragInProgress &&
+        (_dataSource.reachedOldest || _dataSource.reachedNewest)) {
       delta = _applyOverscrollResistance(delta);
     }
 
@@ -1928,8 +1976,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   void _onDragStart(DragStartDetails details) {
     _cancelFling();
     _cancelAnimate();
-    _bouncebackActive = false;
-    _bouncebackStartTime = null;
+    _cancelBounceback();
     _dragInProgress = true;
     _ensureTicker();
     _controller.notifyScrollEvent(const ChatUserDragStart());
@@ -1948,12 +1995,27 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _dragInProgress = false;
     final velocity = details.primaryVelocity ?? 0.0;
     _controller.notifyScrollEvent(ChatUserDragEnd(velocity));
+    // A high-velocity release while overscrolled would otherwise launch
+    // straight into a fling and skip the spring-back entirely — the next
+    // `_clampBoundaries` would hard-snap the boundary. Run bounceback
+    // unconditionally; the fling (if started) composes additively in
+    // `_onTick`, and the bounceback shortens its own life as overscroll
+    // shrinks past zero.
+    _maybeStartBounceback();
     if (velocity.abs() >= 50.0) {
       _startFling(velocity);
-    } else {
-      _maybeStartBounceback();
-      if (!_bouncebackActive) _stopTickerIfIdle();
+    } else if (!_bouncebackActive) {
+      _stopTickerIfIdle();
     }
+  }
+
+  /// Cancel any in-flight bounceback. Called from `_onDragStart`,
+  /// `_onScrollBy`, and the close-path of `animate()` so a programmatic
+  /// scroll / animateTo / new drag does not have to fight the spring-back.
+  void _cancelBounceback() {
+    if (!_bouncebackActive) return;
+    _bouncebackActive = false;
+    _bouncebackStartTime = null;
   }
 
   /// If the viewport is currently overscrolled, arm a spring-back
@@ -1987,10 +2049,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // *increases* topY (positive overscroll). To shrink positive overscroll
     // we need a negative delta. Hence the sign flip:
     final delta = -(currentOverscroll - remainingTarget);
-    if (t >= 1.0) {
-      _bouncebackActive = false;
-      _bouncebackStartTime = null;
-    }
+    if (t >= 1.0) _cancelBounceback();
     return delta;
   }
 
@@ -2150,8 +2209,17 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // "was at tail before" + "newest id advanced since" against the live
     // data-source state. Snapshot fires from both layout and Tier-1 tick
     // paths so the value is always fresh at the start of the next layout.
-    _wasAtTailLastLayout = value;
-    _lastSeenNewestId = _dataSource.newestKnownId;
+    //
+    // Overlay mode is excluded: `_computeIsAtTail` returns false there
+    // even when the user conceptually *was* at the tail, and updating the
+    // snapshot to false would lose the follow-tail signal across an
+    // overlay → normal transition. Same logic for `_lastSeenNewestId` —
+    // if `newestKnownId` is null during initial-loading overlay we
+    // shouldn't anchor against that.
+    if (_overlayKind == ChatOverlayKind.none) {
+      _wasAtTailLastLayout = value;
+      _lastSeenNewestId = _dataSource.newestKnownId;
+    }
     if (_controller.isAtTail.value == value) return;
     _controller.isAtTail = value;
   }

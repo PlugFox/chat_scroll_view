@@ -134,14 +134,22 @@ class ChatScrollElement extends RenderObjectElement
       );
     }
     final separator = _widget.dateSeparatorBuilder;
-    if (startsNewDay && separator != null && message != null) {
-      return DatedMessage(
-        key: ValueKey<int>(id),
-        separator: separator(this, message.createdAt),
-        body: content,
-      );
+    final inner = (startsNewDay && separator != null && message != null)
+        ? DatedMessage(
+            key: ValueKey<int>(id),
+            separator: separator(this, message.createdAt),
+            body: content,
+          )
+        : RepaintBoundary(key: ValueKey<int>(id), child: content);
+    // Honour the explicit `textDirection` override on `ChatScrollView`: when
+    // set, install it so `messageBuilder` reads the same direction the
+    // viewport uses for scrollbar mirroring. Without this wrap the bubble
+    // alignment would silently disagree with the chrome.
+    final override = _widget.textDirection;
+    if (override != null) {
+      return Directionality(textDirection: override, child: inner);
     }
-    return RepaintBoundary(key: ValueKey<int>(id), child: content);
+    return inner;
   }
 
   // --- ChatChildManager (driven by RenderChatScrollView.performLayout) ------

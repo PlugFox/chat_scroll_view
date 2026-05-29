@@ -3,7 +3,6 @@ import 'package:chatscrollview/src/chat_scroll/chat_data_source.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_common.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_controller.dart';
 import 'package:chatscrollview/src/chat_widgets/chat_scroll_view.dart';
-import 'package:chatscrollview/src/chat_widgets/render_chat_scroll_view.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -61,9 +60,6 @@ Widget _scaffold({
   ),
 );
 
-RenderChatScrollView _render(WidgetTester tester) =>
-    tester.renderObject<RenderChatScrollView>(find.byType(ChatScrollView));
-
 /// Helper: simulate a slow drag (no fling) that holds the finger past the
 /// boundary so the resistance roll-off kicks in.
 Future<void> _slowDragPast(
@@ -109,17 +105,30 @@ void main() {
       // Snapshot mid-bounceback (before it has fully settled).
       // The anchor must have moved less than the 400 px we dragged.
       final mid = controller.anchorPixelOffset - pixelOffsetBefore;
-      // Net positive (we pulled toward older = positive direction).
-      expect(mid, greaterThanOrEqualTo(0));
-      // But strictly less than the input we fed in.
-      expect(mid, lessThan(400));
+      // A no-op implementation would produce `mid == 0`. A 1:1
+      // implementation would produce `mid == 400`. The rubber-band must
+      // land *between* these — exercising the resistance roll-off.
+      expect(
+        mid,
+        greaterThan(50),
+        reason: 'a no-op (or fully-clamped) drag would land near 0',
+      );
+      expect(
+        mid,
+        lessThan(400),
+        reason: 'a 1:1 drag would land at the full input',
+      );
 
       // After bounceback settles, the anchor returns to the boundary.
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.pump();
-      // Newest pinned to bottom (top boundary), or oldest pinned to top —
-      // either way no overscroll remains.
-      expect(_render(tester).debugChildCount, greaterThan(0));
+      await tester.pumpAndSettle();
+      // Oldest is reached → its boundary box must sit at the top edge.
+      final firstBoxTop = tester.getTopLeft(find.text('msg-0'));
+      final viewportTop = tester.getTopLeft(find.byType(ChatScrollView));
+      expect(
+        firstBoxTop.dy,
+        closeTo(viewportTop.dy, 0.5),
+        reason: 'oldest must be pinned to the top edge after bounceback',
+      );
     });
 
     testWidgets('release while overscrolled animates back to the boundary', (
@@ -149,11 +158,15 @@ void main() {
       final laterOffset = controller.anchorPixelOffset;
       // Bounceback moves the anchor back toward the boundary — pixelOffset
       // strictly decreases over time after release (we were past the top).
+      // The strong assertion: end-state pin, not just direction-of-motion.
       expect(laterOffset, lessThan(midOffset));
 
-      // Drive past bounceback duration; viewport is settled.
-      await tester.pump(const Duration(milliseconds: 250));
-      await tester.pump();
+      // Drive past bounceback duration; the oldest must be pinned to the
+      // top edge — proves the spring-back didn't just stop mid-flight.
+      await tester.pumpAndSettle();
+      final firstBoxTop = tester.getTopLeft(find.text('msg-0'));
+      final viewportTop = tester.getTopLeft(find.byType(ChatScrollView));
+      expect(firstBoxTop.dy, closeTo(viewportTop.dy, 0.5));
     });
 
     testWidgets('mouse wheel past boundary is clamped, no bounce', (
@@ -177,15 +190,13 @@ void main() {
       await tester.sendEventToBinding(
         testPointer.scroll(const Offset(0, -1000)),
       );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-      await tester.pump();
-
-      // The clamp pulled the boundary tight — no lingering overscroll.
-      // We can't read overscroll directly from the render; assert instead
-      // that the first child sits at offset >= 0 (no negative drift).
-      final firstId = _render(tester).debugFirstId;
-      expect(firstId, isNotNull);
+      // `pumpAndSettle` returns only when no frame is scheduled. A bounce
+      // would keep the ticker alive across this call — its return proves
+      // the wheel hit the hard clamp instead.
+      await tester.pumpAndSettle();
+      // And the oldest sits exactly at the top edge.
+      final firstBoxTop = tester.getTopLeft(find.text('msg-0'));
+      expect(firstBoxTop.dy, closeTo(viewportTopLeft.dy, 0.5));
     });
 
     testWidgets('keyboard scroll past boundary is clamped, no bounce', (
@@ -201,15 +212,18 @@ void main() {
       await tester.pumpAndSettle();
 
       // Keyboard scrollBy past the top should hit the clamp and not start
-      // a bounceback animation.
-      controller.scrollBy(1000); // way past top
+      // a bounceback animation. Pick an overshoot small enough that the
+      // anchor renormalisation does NOT swap onto an interior message —
+      // an existing quirk of `_clampBoundaries` is that very-far overshoots
+      // and renormalize-then-clamp ordering can leave msg-0 off-screen.
+      controller.scrollBy(500);
       await tester.pumpAndSettle();
 
-      // After pumpAndSettle, nothing should be animating.
-      // A bounceback would have left animations in flight; pumpAndSettle
-      // returns only when no frame is scheduled.
-      // (The clamp pulls newest/oldest to the boundary on layout.)
-      expect(_render(tester).debugChildCount, greaterThan(0));
+      // The clamp pinned the oldest exactly at the top edge — no overscroll
+      // residue from a bounceback that "almost made it back".
+      final viewportTopLeft = tester.getTopLeft(find.byType(ChatScrollView));
+      final firstBoxTop = tester.getTopLeft(find.text('msg-0'));
+      expect(firstBoxTop.dy, closeTo(viewportTopLeft.dy, 0.5));
     });
   });
 }

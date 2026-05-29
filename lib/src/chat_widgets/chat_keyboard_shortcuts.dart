@@ -7,9 +7,12 @@ import 'package:flutter/widgets.dart';
 /// the canonical desktop keyboard navigation for a chat viewport:
 ///
 /// * `ArrowUp` / `ArrowDown` — scroll by one [lineExtent] (default 60 px).
+///   Tune to your typical message-row height — this is not derived from
+///   text-line metrics.
 /// * `PageUp` / `PageDown` — scroll by [pageExtent]; when `null`, falls back
-///   to the receiver's `MediaQuery.size.height * pageFraction` so the page
-///   step roughly matches the viewport height.
+///   to `MediaQuery.sizeOf(context).height * pageFraction` so the page step
+///   roughly matches the viewport height. The `MediaQuery` is read *when
+///   the key fires*, not on every rebuild.
 /// * `Home` — `controller.jumpTo(dataSource.oldestKnownId)`. No-op when the
 ///   oldest is unknown (initial load).
 /// * `End` — `controller.jumpTo(dataSource.newestKnownId)`.
@@ -17,9 +20,27 @@ import 'package:flutter/widgets.dart';
 /// Direction-flipping when `reverse` is `true` (chat-style stacking) — so
 /// `PageUp` still reveals *older* messages, which is what chat users expect.
 ///
-/// The wrapper requests focus eagerly so the bindings work without an
-/// explicit click; set [autofocus] to `false` if the host already manages
-/// focus traversal.
+/// ### Focus
+///
+/// The default [autofocus] is **false**. Most chat layouts host a composer
+/// `TextField` below the viewport which should keep focus on mount — an
+/// autofocused wrapper here would silently steal the cursor and force the
+/// user to tap the input before typing. Pass `autofocus: true` when the
+/// wrapper is the only focusable on the route.
+///
+/// ### Example
+///
+/// ```dart
+/// ChatKeyboardShortcuts(
+///   controller: _controller,
+///   dataSource: _ds,
+///   child: ChatScrollView(
+///     controller: _controller,
+///     dataSource: _ds,
+///     messageBuilder: _buildBubble,
+///   ),
+/// )
+/// ```
 class ChatKeyboardShortcuts extends StatefulWidget {
   const ChatKeyboardShortcuts({
     required this.controller,
@@ -29,7 +50,7 @@ class ChatKeyboardShortcuts extends StatefulWidget {
     this.lineExtent = 60.0,
     this.pageExtent,
     this.pageFraction = 0.85,
-    this.autofocus = true,
+    this.autofocus = false,
     super.key,
   });
 
@@ -42,11 +63,12 @@ class ChatKeyboardShortcuts extends StatefulWidget {
   /// container up".
   final bool reverse;
 
-  /// Pixel step for arrow keys.
+  /// Pixel step for arrow keys. Approximates one message-row scroll —
+  /// tune to your typical row height. Not derived from text-line metrics.
   final double lineExtent;
 
-  /// Pixel step for PageUp / PageDown. `null` derives the step from the
-  /// available size's height × [pageFraction].
+  /// Pixel step for PageUp / PageDown. `null` derives the step from
+  /// `MediaQuery.sizeOf(context).height * pageFraction` at key-fire time.
   final double? pageExtent;
 
   /// Fraction of the viewport height to use as the page step when
@@ -54,8 +76,8 @@ class ChatKeyboardShortcuts extends StatefulWidget {
   final double pageFraction;
 
   /// When `true`, the wrapper claims keyboard focus on mount so the
-  /// shortcuts respond without a click. Pass `false` if the host owns
-  /// focus traversal.
+  /// shortcuts respond without a click. Defaults to `false` so the typical
+  /// chat layout's composer `TextField` keeps focus by default.
   final bool autofocus;
 
   @override
@@ -65,6 +87,39 @@ class ChatKeyboardShortcuts extends StatefulWidget {
 
 class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
   late final FocusNode _focusNode;
+
+  /// Static shortcut map — `const`-promotable so the framework can compare
+  /// by identity across rebuilds rather than reallocating per frame.
+  static const Map<ShortcutActivator, Intent> _kShortcuts =
+      <ShortcutActivator, Intent>{
+    SingleActivator(LogicalKeyboardKey.arrowUp): _ScrollLineUpIntent(),
+    SingleActivator(LogicalKeyboardKey.arrowDown): _ScrollLineDownIntent(),
+    SingleActivator(LogicalKeyboardKey.pageUp): _ScrollPageUpIntent(),
+    SingleActivator(LogicalKeyboardKey.pageDown): _ScrollPageDownIntent(),
+    SingleActivator(LogicalKeyboardKey.home): _JumpHomeIntent(),
+    SingleActivator(LogicalKeyboardKey.end): _JumpEndIntent(),
+  };
+
+  late final Map<Type, Action<Intent>> _actions = <Type, Action<Intent>>{
+    _ScrollLineUpIntent: CallbackAction<_ScrollLineUpIntent>(
+      onInvoke: (_) => _onScrollLines(_olderSign),
+    ),
+    _ScrollLineDownIntent: CallbackAction<_ScrollLineDownIntent>(
+      onInvoke: (_) => _onScrollLines(_newerSign),
+    ),
+    _ScrollPageUpIntent: CallbackAction<_ScrollPageUpIntent>(
+      onInvoke: (_) => _onScrollPage(_olderSign),
+    ),
+    _ScrollPageDownIntent: CallbackAction<_ScrollPageDownIntent>(
+      onInvoke: (_) => _onScrollPage(_newerSign),
+    ),
+    _JumpHomeIntent: CallbackAction<_JumpHomeIntent>(
+      onInvoke: (_) => _onJumpHome(),
+    ),
+    _JumpEndIntent: CallbackAction<_JumpEndIntent>(
+      onInvoke: (_) => _onJumpEnd(),
+    ),
+  };
 
   @override
   void initState() {
@@ -78,106 +133,53 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
     super.dispose();
   }
 
-  double _resolvePageStep(double viewportHeight) =>
-      widget.pageExtent ?? (viewportHeight * widget.pageFraction);
+  /// Sign for keys whose intuition is "go back in time" (PageUp, ArrowUp,
+  /// Home in non-reverse layouts). Reverse mode flips it so PageUp still
+  /// reveals older history.
+  int get _olderSign => widget.reverse ? -1 : 1;
+  int get _newerSign => -_olderSign;
 
-  /// Sign convention: `controller.scrollBy(+px)` reveals **older** messages
-  /// (content shifts down). Reverse mode flips the intended direction for
-  /// PageUp / Home / ArrowUp.
-  void _scrollLines(int sign) {
+  Object? _onScrollLines(int sign) {
     widget.controller.scrollBy(widget.lineExtent * sign);
+    return null;
   }
 
-  void _scrollPage(int sign, double viewportHeight) {
-    widget.controller.scrollBy(_resolvePageStep(viewportHeight) * sign);
+  Object? _onScrollPage(int sign) {
+    final pageExtent = widget.pageExtent;
+    final step = pageExtent ??
+        MediaQuery.sizeOf(context).height * widget.pageFraction;
+    widget.controller.scrollBy(step * sign);
+    return null;
   }
 
-  void _jumpHome() {
+  Object? _onJumpHome() {
     final id = widget.reverse
         ? widget.dataSource.newestKnownId
         : widget.dataSource.oldestKnownId;
     if (id != null) widget.controller.jumpTo(id);
+    return null;
   }
 
-  void _jumpEnd() {
+  Object? _onJumpEnd() {
     final id = widget.reverse
         ? widget.dataSource.oldestKnownId
         : widget.dataSource.newestKnownId;
     if (id != null) widget.controller.jumpTo(id);
+    return null;
   }
 
   @override
-  Widget build(BuildContext context) {
-    // Reverse-aware sign for keys that mean "go back in time": PageUp /
-    // ArrowUp reveal older history in either stacking mode.
-    final olderSign = widget.reverse ? -1 : 1;
-    final newerSign = -olderSign;
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final viewportHeight = constraints.maxHeight.isFinite
-            ? constraints.maxHeight
-            : MediaQuery.of(context).size.height;
-        return Shortcuts(
-          shortcuts: const <ShortcutActivator, Intent>{
-            SingleActivator(LogicalKeyboardKey.arrowUp): _ScrollLineUpIntent(),
-            SingleActivator(LogicalKeyboardKey.arrowDown):
-                _ScrollLineDownIntent(),
-            SingleActivator(LogicalKeyboardKey.pageUp): _ScrollPageUpIntent(),
-            SingleActivator(LogicalKeyboardKey.pageDown):
-                _ScrollPageDownIntent(),
-            SingleActivator(LogicalKeyboardKey.home): _JumpHomeIntent(),
-            SingleActivator(LogicalKeyboardKey.end): _JumpEndIntent(),
-          },
-          child: Actions(
-            actions: <Type, Action<Intent>>{
-              _ScrollLineUpIntent: CallbackAction<_ScrollLineUpIntent>(
-                onInvoke: (_) {
-                  _scrollLines(olderSign);
-                  return null;
-                },
-              ),
-              _ScrollLineDownIntent: CallbackAction<_ScrollLineDownIntent>(
-                onInvoke: (_) {
-                  _scrollLines(newerSign);
-                  return null;
-                },
-              ),
-              _ScrollPageUpIntent: CallbackAction<_ScrollPageUpIntent>(
-                onInvoke: (_) {
-                  _scrollPage(olderSign, viewportHeight);
-                  return null;
-                },
-              ),
-              _ScrollPageDownIntent: CallbackAction<_ScrollPageDownIntent>(
-                onInvoke: (_) {
-                  _scrollPage(newerSign, viewportHeight);
-                  return null;
-                },
-              ),
-              _JumpHomeIntent: CallbackAction<_JumpHomeIntent>(
-                onInvoke: (_) {
-                  _jumpHome();
-                  return null;
-                },
-              ),
-              _JumpEndIntent: CallbackAction<_JumpEndIntent>(
-                onInvoke: (_) {
-                  _jumpEnd();
-                  return null;
-                },
-              ),
-            },
-            child: Focus(
-              focusNode: _focusNode,
-              autofocus: widget.autofocus,
-              child: widget.child,
-            ),
-          ),
-        );
-      },
-    );
-  }
+  Widget build(BuildContext context) => Shortcuts(
+    shortcuts: _kShortcuts,
+    child: Actions(
+      actions: _actions,
+      child: Focus(
+        focusNode: _focusNode,
+        autofocus: widget.autofocus,
+        child: widget.child,
+      ),
+    ),
+  );
 }
 
 // --- Intents --------------------------------------------------------------

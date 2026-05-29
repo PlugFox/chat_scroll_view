@@ -71,6 +71,7 @@ class ChatScrollController {
   void addScrollByListener(ValueChanged<double> callback) =>
       _scrollByListeners.add(callback);
 
+  /// Unsubscribe from `scrollBy` events.
   void removeScrollByListener(ValueChanged<double> callback) =>
       _scrollByListeners.remove(callback);
 
@@ -79,6 +80,14 @@ class ChatScrollController {
   /// moves up). Use for keyboard scroll, mouse-wheel forwarding, or any
   /// programmatic "scroll by N pixels" affordance — the underlying physics
   /// (clamping, follow-tail, fetch poll) all settle on the next frame.
+  ///
+  /// **Sign convention is anchor-relative**, the opposite of a Flutter
+  /// `ScrollController.position.pixels` delta. When porting code from a
+  /// `ListView` scroll listener, negate the value.
+  ///
+  /// **`scrollBy(0.0)` is a silent no-op** — listeners are not notified
+  /// and `ChatProgrammaticScroll` is not emitted. If a consumer counts
+  /// notifications, account for the zero short-circuit.
   ///
   /// To navigate to a specific message id use [jumpTo] or [animateTo]
   /// instead. To know "what's N viewport-heights away" the consumer needs
@@ -152,6 +161,13 @@ class ChatScrollController {
   /// the data source has reported [ChatDataSource.reachedNewest]. `false`
   /// when the conversation has no boundary yet, the viewport is in overlay
   /// mode, or the user has scrolled away from the bottom.
+  ///
+  /// **Initial value is `false`.** The first push happens at the end of
+  /// the first `performLayout`, so listeners attached in `initState` will
+  /// observe a `false → true` transition on the next frame when the
+  /// viewport is at the tail. UI built off the initial synchronous value
+  /// (e.g. a new-messages pill in `initState`) will briefly show as if
+  /// the user were *not* at the tail until the first layout runs.
   ///
   /// Drives the canonical "follow tail" UI patterns: hide a
   /// new-messages-pill when the user is already pinned to the newest, show

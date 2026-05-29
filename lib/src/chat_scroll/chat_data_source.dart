@@ -282,8 +282,11 @@ abstract class ChatDataSource {
   /// are reset; an errored chunk reaches the user as `dirty` again rather
   /// than carrying the prior failure state into the new attempt.
   void invalidate() {
-    _cancelFetch();
-    var changed = false;
+    // Coalesce the cancel-fetch notification into ours: otherwise listeners
+    // see two `notifyDataChanged` calls (one from the running fetch's
+    // status drop, one from the dirty-marking pass) for what is logically
+    // a single state change.
+    var changed = _cancelFetchSilent();
     for (final chunk in _chunks.values) {
       // Don't overwrite a chunk that is already dirty (or fetching after a
       // cancelFetch race) — the goal is "mark stale", not "reset to a
@@ -332,8 +335,18 @@ abstract class ChatDataSource {
   }
 
   void _cancelFetch() {
-    // Clear the `fetching` flag from chunks that were part of the in-flight
-    // range so they don't get stuck in an indeterminate state.
+    final changed = _cancelFetchSilent();
+    // Listeners (the viewport, debug overlays) need to know the fetching
+    // flag dropped — a chunk stuck in `fetching` after detach / source-swap
+    // would render an indefinite shimmer.
+    if (changed) notifyDataChanged();
+  }
+
+  /// Like [_cancelFetch] but does not notify — returns whether any chunk
+  /// status flag changed so the caller can fold the notification into its
+  /// own pass (the `invalidate` path coalesces it with subsequent dirty
+  /// marks).
+  bool _cancelFetchSilent() {
     var changed = false;
     if (_fetchingChunks.isNotEmpty) {
       for (final ci in _fetchingChunks) {
@@ -349,10 +362,7 @@ abstract class ChatDataSource {
     _fetchingMaxChunk = -1;
     _retryTimer?.cancel();
     _retryTimer = null;
-    // Listeners (the viewport, debug overlays) need to know the fetching
-    // flag dropped — a chunk stuck in `fetching` after detach / source-swap
-    // would render an indefinite shimmer.
-    if (changed) notifyDataChanged();
+    return changed;
   }
 
   void _executeFetch() {

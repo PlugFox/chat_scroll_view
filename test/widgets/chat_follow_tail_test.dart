@@ -160,7 +160,15 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('msg-20'), findsOneWidget);
+      // Strong assertion: msg-20 sits exactly at the bottom edge — proving
+      // the pin moved, not just that the widget is in the cache extent.
+      final viewportBottom = tester.getBottomLeft(find.byType(ChatScrollView));
+      final msg20Bottom = tester.getBottomLeft(find.text('msg-20'));
+      expect(
+        msg20Bottom.dy,
+        closeTo(viewportBottom.dy, 0.5),
+        reason: 'newest must be pinned to the bottom edge after auto-scroll',
+      );
       expect(controller.isAtTail.value, isTrue);
     });
 

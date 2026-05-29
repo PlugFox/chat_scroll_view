@@ -240,6 +240,61 @@ void main() {
       await tester.pumpAndSettle();
       expect(controller.anchorPixelOffset, before);
     });
+
+    testWidgets(
+      'composer TextField keeps focus when shortcuts wrapper has autofocus=false',
+      (tester) async {
+        const count = 256;
+        final controller = ChatScrollController()..jumpTo(count ~/ 2);
+        final ds = _PreloadedDataSource(count);
+        final composerKey = GlobalKey();
+        addTearDown(controller.dispose);
+        addTearDown(ds.dispose);
+
+        await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: <Widget>[
+                Expanded(
+                  child: ChatKeyboardShortcuts(
+                    controller: controller,
+                    dataSource: ds,
+                    // Default is autofocus: false — verified by passing it
+                    // explicitly so the test is robust to future renames.
+                    autofocus: false,
+                    child: ChatScrollView(
+                      controller: controller,
+                      dataSource: ds,
+                      cacheExtent: 1000,
+                      messageBuilder:
+                          (context, id, message, status) => SizedBox(
+                        height: 60,
+                        child: Text(
+                          message == null ? 'shimmer-$id' : 'msg-$id',
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                TextField(key: composerKey, autofocus: true),
+              ],
+            ),
+          ),
+        ));
+        await tester.pumpAndSettle();
+
+        // The composer must own focus — the wrapper did not steal it.
+        final composer = tester.widget<TextField>(find.byKey(composerKey));
+        final FocusNode? composerNode = composer.focusNode;
+        expect(
+          composerNode?.hasFocus ?? FocusScope.of(
+            composerKey.currentContext!,
+          ).hasFocus,
+          isTrue,
+          reason: 'composer must retain focus over the chat wrapper',
+        );
+      },
+    );
   });
 
   group('ChatScrollController.scrollBy', () {
