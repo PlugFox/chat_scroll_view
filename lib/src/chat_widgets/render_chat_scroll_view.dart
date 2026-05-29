@@ -783,50 +783,43 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _pollTimer?.cancel();
     _pollTimer = null;
     _lastScrollTs = 0;
+    // Belt-and-suspenders: also queue a *direct* fetch dispatch that
+    // happens at the end of the next layout, regardless of timer state.
+    // Rapid drags (scrollbar moves, selection-mode chrome animations
+    // interleaved with pointer events, …) make the timer-based
+    // `_scheduleFetchPoll` race against pointer dispatch — the armed
+    // `Duration.zero` timer may be cancelled by a subsequent `_onJump`
+    // *or* the pending microtask may simply never get to drain between
+    // pointer events. The synchronous dispatch out of `performLayout`
+    // does not race and runs in O(1).
+    _jumpFetchPending = true;
     markNeedsLayout();
-    // Belt-and-suspenders: also dispatch the fetch *directly* in a
-    // post-frame callback. Rapid scrollbar drag fires many `_onJump`s
-    // in succession, and the bookkeeping above (cancel + re-arm)
-    // races with pointer events — the armed poll timer may be
-    // cancelled by the *next* `_onJump` before its microtask gets to
-    // fire, leaving the new range with no in-flight fetch.
-    //
-    // The post-frame callback runs *after* the upcoming layout has
-    // updated `_layoutMinChunk`/`_layoutMaxChunk`. Calling
-    // `requestChunks` directly is idempotent: a sameRange in-flight
-    // request bails inside the data source, so the extra callbacks
-    // queued by a long drag collapse to one effective fetch for the
-    // final range. This bypasses the timer entirely and removes the
-    // race against rapid pointer dispatch.
-    _scheduleJumpFetchDispatch();
   }
 
-  /// Set when a jump has queued a post-frame fetch dispatch and we
-  /// have not yet processed it. Prevents a long scrollbar drag from
-  /// queueing dozens of redundant callbacks (one per move).
-  bool _jumpFetchDispatchPending = false;
+  /// Set by `_onJump` when a discrete navigate happened and the next
+  /// layout must dispatch a fetch for the new range without waiting on
+  /// the scroll-debounce poll. Cleared at the end of `performLayout`.
+  bool _jumpFetchPending = false;
 
-  void _scheduleJumpFetchDispatch() {
-    if (_jumpFetchDispatchPending) return;
-    _jumpFetchDispatchPending = true;
-    SchedulerBinding.instance.addPostFrameCallback(_dispatchJumpFetch);
-  }
-
-  void _dispatchJumpFetch(Duration _) {
-    _jumpFetchDispatchPending = false;
-    // The post-frame fires after the frame's layout phase, so
-    // `_layoutMinChunk`/`_layoutMaxChunk` reflect the jump's new range.
-    // Empty range (overlay mode, no built children) — nothing to fetch.
-    if (_layoutMaxChunk < _layoutMinChunk) return;
-    // No attached data source after detach. Defensive: post-frame
-    // callbacks can outlive a detach by exactly one frame.
-    if (_jumpFetchDispatchDetached) return;
-    _dataSource.requestChunks(_layoutMinChunk, _layoutMaxChunk);
-  }
-
-  /// Cleared on attach, set on detach — guards the post-frame callback
-  /// from touching a stale data source.
+  /// Cleared on attach, set on detach — guards the deferred
+  /// post-layout dispatch from touching a stale data source.
   bool _jumpFetchDispatchDetached = false;
+
+  /// Dispatched from the end of `performLayout` when [_jumpFetchPending]
+  /// is set. Forwards `requestChunks` through a microtask so the data
+  /// source's synchronous `notifyDataChanged` does not run inside our
+  /// own layout (which would re-mark dirty and waste a layout pass).
+  void _maybeDispatchJumpFetch() {
+    if (!_jumpFetchPending) return;
+    _jumpFetchPending = false;
+    if (_layoutMaxChunk < _layoutMinChunk) return;
+    final minChunk = _layoutMinChunk;
+    final maxChunk = _layoutMaxChunk;
+    scheduleMicrotask(() {
+      if (_jumpFetchDispatchDetached) return;
+      _dataSource.requestChunks(minChunk, maxChunk);
+    });
+  }
 
   void _onScrollBy(double delta) {
     _cancelFling();
@@ -993,6 +986,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _updateScrollSemantics();
     _publishControllerState();
     _scheduleFetchPoll();
+    _maybeDispatchJumpFetch();
     _updateFloatingHeader();
 
     assert(() {

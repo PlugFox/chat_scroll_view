@@ -3,6 +3,7 @@ import 'package:chatscrollview/src/chat_scroll/chat_data_source.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_chunk.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_common.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_controller.dart';
+import 'package:chatscrollview/src/chat_scroll/chat_selection_controller.dart';
 import 'package:chatscrollview/src/chat_widgets/chat_scroll_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -49,6 +50,7 @@ class _RecordingDataSource extends ChatDataSource {
 Widget _scaffold({
   required ChatDataSource dataSource,
   required ChatScrollController controller,
+  ChatSelectionController? selectionController,
 }) => MaterialApp(
   home: Scaffold(
     body: Center(
@@ -58,6 +60,7 @@ Widget _scaffold({
         child: ChatScrollView(
           dataSource: dataSource,
           controller: controller,
+          selectionController: selectionController,
           messageBuilder: (context, id, message, status) => SizedBox(
             height: 60,
             child: Text(message == null ? 'shimmer-$id' : 'msg-$id'),
@@ -175,6 +178,63 @@ void main() {
           reason: 'scrollbar jump performed within the post-gesture debounce '
               'window must still trigger a fetch — without a follow-up '
               'gesture-scroll.',
+        );
+        expect(controller.anchorMessageId, greaterThan(1000));
+      },
+    );
+
+    testWidgets(
+      'in selection mode: scrollbar drag still fetches the new range',
+      (tester) async {
+        // User-reported regression: entering selection mode (long-press)
+        // then dragging the scrollbar reproduces the original
+        // "fetch never starts" bug. The SelectableMessage wrapper adds a
+        // `GestureDetector(behavior: HitTestBehavior.opaque)` per message,
+        // which may interfere with the pointer-event routing or layout
+        // cadence even though the scrollbar's pointer is on the trailing
+        // strip outside the message body.
+        const total = 5000;
+        final controller = ChatScrollController()..jumpTo(0);
+        final ds = _RecordingDataSource(total);
+        final selection = ChatSelectionController();
+        addTearDown(controller.dispose);
+        addTearDown(ds.dispose);
+        addTearDown(selection.dispose);
+
+        await tester.pumpWidget(_scaffold(
+          dataSource: ds,
+          controller: controller,
+          selectionController: selection,
+        ));
+        await tester.pumpAndSettle();
+
+        // Long-press a visible message to enter selection mode.
+        await tester.longPress(find.text('msg-0'));
+        await tester.pumpAndSettle();
+        expect(selection.isSelectionMode, isTrue);
+        ds.requests.clear();
+
+        // Drag the scrollbar to a far position.
+        final viewportTopLeft = tester.getTopLeft(find.byType(ChatScrollView));
+        final start = viewportTopLeft + const Offset(395, 80);
+        final end = viewportTopLeft + const Offset(395, 540);
+        final gesture = await tester.startGesture(start);
+        for (var i = 1; i <= 10; i++) {
+          await gesture.moveTo(Offset(
+            start.dx,
+            start.dy + (end.dy - start.dy) * (i / 10),
+          ));
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        await gesture.up();
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(
+          ds.requests,
+          isNotEmpty,
+          reason: 'selection mode + scrollbar drag must trigger a fetch '
+              'without a follow-up gesture.',
         );
         expect(controller.anchorMessageId, greaterThan(1000));
       },
