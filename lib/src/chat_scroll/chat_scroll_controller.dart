@@ -61,6 +61,41 @@ class ChatScrollController {
     _emitScroll(ChatProgrammaticJump(messageId));
   }
 
+  // --- Scroll-by: typed listener -------------------------------------------
+
+  final _scrollByListeners = <ValueChanged<double>>[];
+
+  /// Subscribe to programmatic `scrollBy` events. Callback receives the
+  /// pixel delta. Used by the viewport to cancel any in-flight fling and
+  /// relayout in response; consumers can listen too if they need to react.
+  void addScrollByListener(ValueChanged<double> callback) =>
+      _scrollByListeners.add(callback);
+
+  void removeScrollByListener(ValueChanged<double> callback) =>
+      _scrollByListeners.remove(callback);
+
+  /// Shift the viewport's anchor by [pixels]. Positive values reveal older
+  /// messages (content moves down); negative values reveal newer (content
+  /// moves up). Use for keyboard scroll, mouse-wheel forwarding, or any
+  /// programmatic "scroll by N pixels" affordance — the underlying physics
+  /// (clamping, follow-tail, fetch poll) all settle on the next frame.
+  ///
+  /// To navigate to a specific message id use [jumpTo] or [animateTo]
+  /// instead. To know "what's N viewport-heights away" the consumer needs
+  /// the current viewport size, which the controller does not own — fold
+  /// that into [pixels] at the call site.
+  void scrollBy(double pixels) {
+    if (pixels == 0.0) return;
+    _anchorPixelOffset += pixels;
+    for (final cb in List<ValueChanged<double>>.of(
+      _scrollByListeners,
+      growable: false,
+    )) {
+      cb(pixels);
+    }
+    _emitScroll(ChatProgrammaticScroll(pixels));
+  }
+
   /// Smoothly move the anchor onto [messageId] over [duration].
   ///
   /// Returns a Future that completes when the animation settles (or
@@ -190,6 +225,7 @@ class ChatScrollController {
   void dispose() {
     _jumpListeners.clear();
     _scrollListeners.clear();
+    _scrollByListeners.clear();
     _visibleRange.dispose();
     _isAtTail.dispose();
   }

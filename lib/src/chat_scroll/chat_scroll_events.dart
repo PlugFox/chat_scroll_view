@@ -51,3 +51,10 @@ class ChatAnimateEnd extends ChatScrollEvent {
   const ChatAnimateEnd(this.targetId);
   final int targetId;
 }
+
+/// `controller.scrollBy` was called programmatically. [delta] is the pixel
+/// shift applied to the anchor; positive = revealing older messages.
+class ChatProgrammaticScroll extends ChatScrollEvent {
+  const ChatProgrammaticScroll(this.delta);
+  final double delta;
+}

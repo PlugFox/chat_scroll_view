@@ -3,6 +3,7 @@ import 'package:chatscrollview/src/chat_scroll/chat_data_source.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_common.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_scroll_controller.dart';
 import 'package:chatscrollview/src/chat_scroll/chat_selection_controller.dart';
+import 'package:chatscrollview/src/chat_widgets/chat_keyboard_shortcuts.dart';
 import 'package:chatscrollview/src/chat_widgets/chat_scroll_view.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/chat_composer.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/date_separator.dart';
@@ -118,17 +119,21 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
           Positioned.fill(
             child: SafeArea(
               bottom: false,
-              child: ChatScrollView(
-                dataSource: _dataSource!,
+              child: ChatKeyboardShortcuts(
                 controller: _controller,
-                selectionController: _selection,
-                bottomPadding: _bottomInset,
-                messageBuilder: _buildMessage,
-                chunkErrorBuilder: _buildChunkError,
-                emptyBuilder: _buildEmpty,
-                loadingBuilder: _buildInitialSkeleton,
-                dateSeparatorBuilder: (context, date) =>
-                    DateSeparator(date: date),
+                dataSource: _dataSource!,
+                child: ChatScrollView(
+                  dataSource: _dataSource!,
+                  controller: _controller,
+                  selectionController: _selection,
+                  bottomPadding: _bottomInset,
+                  messageBuilder: _buildMessage,
+                  chunkErrorBuilder: _buildChunkError,
+                  emptyBuilder: _buildEmpty,
+                  loadingBuilder: _buildInitialSkeleton,
+                  dateSeparatorBuilder: (context, date) =>
+                      DateSeparator(date: date),
+                ),
               ),
             ),
           ),

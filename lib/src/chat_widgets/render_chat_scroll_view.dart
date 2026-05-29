@@ -165,6 +165,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       _cancelAnimate();
       _controller
         ..removeJumpListener(_onJump)
+        ..removeScrollByListener(_onScrollBy)
         ..animator = null
         ..visibleRange = null
         ..isAtTail = false;
@@ -173,6 +174,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     if (attached) {
       _controller
         ..addJumpListener(_onJump)
+        ..addScrollByListener(_onScrollBy)
         ..animator = this;
     }
     markNeedsLayout();
@@ -568,6 +570,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       ..addBoundaryListener(_onBoundaryChanged);
     _controller
       ..addJumpListener(_onJump)
+      ..addScrollByListener(_onScrollBy)
       ..animator = this;
     _bottomPadding?.addListener(_onBottomPaddingChanged);
     _topPadding?.addListener(_onTopPaddingChanged);
@@ -592,6 +595,7 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _dataSource.cancelFetch();
     _controller
       ..removeJumpListener(_onJump)
+      ..removeScrollByListener(_onScrollBy)
       ..animator = null
       // Mirror the controller-swap path: once no viewport is bound, the
       // last-published state no longer reflects anything observable.
@@ -662,6 +666,12 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
 
   void _onJump(int messageId) {
     _cancelFling();
+    markNeedsLayout();
+  }
+
+  void _onScrollBy(double delta) {
+    _cancelFling();
+    _cancelAnimate();
     markNeedsLayout();
   }
 
