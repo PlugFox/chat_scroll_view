@@ -37,15 +37,18 @@ abstract class ChatScrollAnimator {
 class ChatScrollController {
   // --- Jump: typed listener with payload ---
 
-  /// `LinkedHashSet` (literal `<...>{}` is a `LinkedHashSet`) so a duplicate
-  /// `addJumpListener` is a no-op — otherwise the symmetric `remove` only
-  /// strips one of multiple registrations and the listener silently leaks.
-  final _jumpListeners = <ValueChanged<int>>{};
+  /// Plain `List` so the field's runtime type stays stable across hot-reload
+  /// (a `Set<>` would trip `_Set is not List` on any old code path that
+  /// hadn't been re-jited yet). `addJumpListener` dedups explicitly so a
+  /// double-registration with the same closure is a no-op.
+  final _jumpListeners = <ValueChanged<int>>[];
 
   /// Subscribe to jump events. Callback receives the target message ID.
   /// Adding the same callback twice is a no-op.
-  void addJumpListener(ValueChanged<int> callback) =>
-      _jumpListeners.add(callback);
+  void addJumpListener(ValueChanged<int> callback) {
+    if (_jumpListeners.contains(callback)) return;
+    _jumpListeners.add(callback);
+  }
 
   /// Unsubscribe from jump events.
   void removeJumpListener(ValueChanged<int> callback) =>
@@ -69,15 +72,17 @@ class ChatScrollController {
 
   // --- Scroll-by: typed listener -------------------------------------------
 
-  /// `LinkedHashSet` — same dedup rationale as [_jumpListeners].
-  final _scrollByListeners = <ValueChanged<double>>{};
+  /// Plain `List` — same dedup-on-add rationale as [_jumpListeners].
+  final _scrollByListeners = <ValueChanged<double>>[];
 
   /// Subscribe to programmatic `scrollBy` events. Callback receives the
   /// pixel delta. Used by the viewport to cancel any in-flight fling and
   /// relayout in response; consumers can listen too if they need to react.
   /// Adding the same callback twice is a no-op.
-  void addScrollByListener(ValueChanged<double> callback) =>
-      _scrollByListeners.add(callback);
+  void addScrollByListener(ValueChanged<double> callback) {
+    if (_scrollByListeners.contains(callback)) return;
+    _scrollByListeners.add(callback);
+  }
 
   /// Unsubscribe from `scrollBy` events.
   void removeScrollByListener(ValueChanged<double> callback) =>
@@ -215,13 +220,15 @@ class ChatScrollController {
 
   // --- Scroll events -------------------------------------------------------
 
-  /// `LinkedHashSet` — same dedup rationale as [_jumpListeners].
-  final _scrollListeners = <ValueChanged<ChatScrollEvent>>{};
+  /// Plain `List` — same dedup-on-add rationale as [_jumpListeners].
+  final _scrollListeners = <ValueChanged<ChatScrollEvent>>[];
 
   /// Subscribe to typed scroll events ([ChatUserDragStart], [ChatFlingStart],
   /// [ChatProgrammaticJump], …). Adding the same callback twice is a no-op.
-  void addScrollListener(ValueChanged<ChatScrollEvent> callback) =>
-      _scrollListeners.add(callback);
+  void addScrollListener(ValueChanged<ChatScrollEvent> callback) {
+    if (_scrollListeners.contains(callback)) return;
+    _scrollListeners.add(callback);
+  }
 
   void removeScrollListener(ValueChanged<ChatScrollEvent> callback) =>
       _scrollListeners.remove(callback);

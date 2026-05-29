@@ -771,6 +771,31 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // running an invisible fade against the old slot — drop it.
     _clearHighlight();
     _cancelBounceback();
+    // Treat a jump as a discrete user intent (scrollbar drag, Home/End,
+    // programmatic `controller.jumpTo`) — *not* part of a continuous fling
+    // or wheel scroll. The fetch-poll's scroll-debounce was designed to
+    // hold off network traffic until a fast scroll settles, but a jump
+    // *is* the settle. Without this reset:
+    //
+    //   * `_pollTimer` may still be armed for the previous range — the
+    //     guard in `_scheduleFetchPoll` (line ~1997) silently skips the
+    //     re-arm because a timer already exists, so the next layout's
+    //     fetch-poll for the new range never gets a chance to fire on its
+    //     own short delay.
+    //   * `_lastScrollTs` may have been bumped within the last
+    //     `_pollInterval` by an earlier gesture / wheel / fling tick. The
+    //     next layout's `_scheduleFetchPoll` would then arm with the full
+    //     `_pollInterval` delay, and `_onPollTick`'s same-debounce check
+    //     would skip the fetch outright — chunks at the new anchor stay
+    //     `dirty` forever until the user *also* nudges the viewport with
+    //     a gesture, which is what the user-visible bug looked like.
+    //
+    // Dropping the timer + clearing the timestamp ensures the next layout
+    // arms a fresh `Duration.zero` poll and the resulting tick actually
+    // dispatches the fetch.
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _lastScrollTs = 0;
     markNeedsLayout();
   }
 

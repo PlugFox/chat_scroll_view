@@ -136,16 +136,21 @@ abstract class ChatDataSource {
 
   // --- Typed listener: boundary changed ---
 
-  /// `LinkedHashSet` so a double-`addBoundaryListener` with the same closure
-  /// is a no-op (otherwise the listener fired twice per notification and the
-  /// symmetric `remove` only stripped one registration). Insertion order is
-  /// preserved so notification order is stable.
-  final _boundaryListeners = <VoidCallback>{};
+  /// Plain `List` rather than `Set` so the field's runtime type stays
+  /// stable across hot-reload. `addBoundaryListener` dedups explicitly so
+  /// a double-registration with the same closure is a no-op (otherwise the
+  /// listener fired twice per notification and the symmetric `remove` only
+  /// stripped one registration). A `Set<>` field would change the typed
+  /// schema mid-session and trip a `_Set is not List` runtime error in any
+  /// hot-reloaded code path that still expected the old type.
+  final _boundaryListeners = <VoidCallback>[];
 
   /// Subscribe to boundary state changes. Adding the same callback twice is
   /// a no-op — the registration is dedup'd.
-  void addBoundaryListener(VoidCallback callback) =>
-      _boundaryListeners.add(callback);
+  void addBoundaryListener(VoidCallback callback) {
+    if (_boundaryListeners.contains(callback)) return;
+    _boundaryListeners.add(callback);
+  }
 
   /// Unsubscribe from boundary state changes.
   void removeBoundaryListener(VoidCallback callback) =>
@@ -540,12 +545,14 @@ abstract class ChatDataSource {
 
   // --- Typed listener: data changed ---
 
-  /// `LinkedHashSet` for the same reason as [_boundaryListeners]: duplicate
-  /// registrations dedup, removal is symmetric, iteration order is stable.
-  final _dataListeners = <VoidCallback>{};
+  /// Plain `List` — see [_boundaryListeners]. Same dedup-on-add invariant.
+  final _dataListeners = <VoidCallback>[];
 
   /// Subscribe to data changes. Adding the same callback twice is a no-op.
-  void addDataListener(VoidCallback callback) => _dataListeners.add(callback);
+  void addDataListener(VoidCallback callback) {
+    if (_dataListeners.contains(callback)) return;
+    _dataListeners.add(callback);
+  }
 
   /// Unsubscribe from data changes.
   void removeDataListener(VoidCallback callback) =>

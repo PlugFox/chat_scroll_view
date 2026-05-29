@@ -59,14 +59,18 @@ class ChatSelectionController implements Listenable {
 
   // --- Listeners ---
 
-  /// `LinkedHashSet` (literal `<...>{}` is a `LinkedHashSet`) so a duplicate
-  /// `addListener` is a no-op — otherwise the symmetric `removeListener`
-  /// only strips one of multiple registrations and the listener silently
-  /// keeps firing for the rest of the controller's lifetime.
-  final _listeners = <VoidCallback>{};
+  /// Plain `List` so the field's runtime type stays stable across hot-reload.
+  /// `addListener` dedups explicitly so a double-registration with the same
+  /// closure is a no-op — otherwise the symmetric `removeListener` only
+  /// strips one of multiple registrations and the listener silently keeps
+  /// firing for the rest of the controller's lifetime.
+  final _listeners = <VoidCallback>[];
 
   @override
-  void addListener(VoidCallback listener) => _listeners.add(listener);
+  void addListener(VoidCallback listener) {
+    if (_listeners.contains(listener)) return;
+    _listeners.add(listener);
+  }
 
   @override
   void removeListener(VoidCallback listener) => _listeners.remove(listener);
