@@ -178,27 +178,43 @@ abstract class ChatDataSource {
   }
 
   /// Upsert a message into the chunk cache.
-  /// Creates the chunk if it does not exist yet.
+  ///
+  /// Creates the chunk if it does not exist yet. A freshly-created chunk is
+  /// marked `valid` — the upsert is the consumer's source of truth, so a
+  /// subsequent poll must not re-fetch this chunk and overwrite the local
+  /// message with whatever (possibly empty) page the server returns. If a
+  /// real refresh is wanted, call [invalidate] afterwards.
   void upsertMessage(IChatMessage message) {
+    if (_disposed) return;
     final chunkIndex = ChatScrollChunk.chunkOf(message.id);
+    final existed = _chunks.containsKey(chunkIndex);
     final chunk = _chunks.putIfAbsent(
       chunkIndex,
-      () => ChatScrollChunk(index: chunkIndex),
+      () => ChatScrollChunk(index: chunkIndex)..status = ChatMessageStatus.valid,
     );
     chunk.messages[message.id - chunk.firstId] = message;
+    // Defensive: a chunk created here used to default to `dirty`, which would
+    // race with the next poll. If somebody constructed a chunk by hand and we
+    // upserted into it, leave its status alone.
+    if (!existed) chunk.status = ChatMessageStatus.valid;
     notifyDataChanged();
   }
 
-  /// Upsert multiple messages into the chunk cache.
+  /// Upsert multiple messages into the chunk cache. See [upsertMessage] for
+  /// the chunk-status contract.
   void upsertMessages(Iterable<IChatMessage> messages) {
+    if (_disposed) return;
     var changed = false;
     for (final message in messages) {
       final chunkIndex = ChatScrollChunk.chunkOf(message.id);
+      final existed = _chunks.containsKey(chunkIndex);
       final chunk = _chunks.putIfAbsent(
         chunkIndex,
-        () => ChatScrollChunk(index: chunkIndex),
+        () =>
+            ChatScrollChunk(index: chunkIndex)..status = ChatMessageStatus.valid,
       );
       chunk.messages[message.id - chunk.firstId] = message;
+      if (!existed) chunk.status = ChatMessageStatus.valid;
       changed = true;
     }
     if (changed) notifyDataChanged();
@@ -236,6 +252,7 @@ abstract class ChatDataSource {
   /// Called from the viewport's periodic poll timer.
   @internal
   void requestChunks(int layoutMinChunk, int layoutMaxChunk) {
+    if (_disposed) return;
     // Find the actual range that needs fetching.
     var needsMin = -1;
     var needsMax = -1;
@@ -247,12 +264,15 @@ abstract class ChatDataSource {
     }
     if (needsMin < 0) return; // all chunks valid
 
-    // Same range already fetching — wait for it.
-    if (_fetchToken != null &&
-        _fetchingMinChunk == needsMin &&
-        _fetchingMaxChunk == needsMax) {
-      return;
-    }
+    // Same range already in flight — wait for it. Treat a pending retry
+    // timer as in-flight too; otherwise a poll between the error handler
+    // arming the retry and the timer firing would see `_fetchToken == null`,
+    // fall through, cancel the retry, reset the backoff step, and immediately
+    // re-fire `_executeFetch` — defeating the exponential backoff and
+    // hammering a failing endpoint at the poll cadence.
+    final sameRange =
+        _fetchingMinChunk == needsMin && _fetchingMaxChunk == needsMax;
+    if (sameRange && (_fetchToken != null || _retryTimer != null)) return;
 
     // New range — cancel old request and start fresh.
     _cancelFetch();
@@ -264,7 +284,10 @@ abstract class ChatDataSource {
 
   /// Cancel any in-flight fetch and retry timer.
   @internal
-  void cancelFetch() => _cancelFetch();
+  void cancelFetch() {
+    if (_disposed) return;
+    _cancelFetch();
+  }
 
   /// Mark every loaded chunk as stale so the viewport refetches them on the
   /// next pass — lazy: in-range chunks get a fresh fetch from the poll;
@@ -282,11 +305,17 @@ abstract class ChatDataSource {
   /// are reset; an errored chunk reaches the user as `dirty` again rather
   /// than carrying the prior failure state into the new attempt.
   void invalidate() {
+    if (_disposed) return;
     // Coalesce the cancel-fetch notification into ours: otherwise listeners
     // see two `notifyDataChanged` calls (one from the running fetch's
     // status drop, one from the dirty-marking pass) for what is logically
     // a single state change.
     var changed = _cancelFetchSilent();
+    // Reset source-wide backoff step so the post-invalidate refetch starts
+    // from the initial window rather than inheriting accumulated backoff
+    // (the per-chunk `lastError`/`failedAttempts` reset below is not enough
+    // — `_fetchRetryStep` lives on the source).
+    _fetchRetryStep = 0;
     for (final chunk in _chunks.values) {
       // Don't overwrite a chunk that is already dirty (or fetching after a
       // cancelFetch race) — the goal is "mark stale", not "reset to a
@@ -311,23 +340,41 @@ abstract class ChatDataSource {
   ///
   /// Intended for UI retry — the user taps "Retry" on a chunk that failed,
   /// and the viewport's poll alone would either wait out the backoff or skip
-  /// the chunk if the user is no longer near it. Resets the backoff step
-  /// and fires a fresh fetch scoped to the single chunk.
+  /// the chunk if the user is no longer near it. Resets the backoff step and
+  /// per-chunk `failedAttempts` / `lastError` so the next attempt is reported
+  /// to the UI as a fresh first try, and fires a fresh fetch scoped to the
+  /// single chunk.
   ///
-  /// Cancels any in-flight fetch (the source orchestrates a single fetch
-  /// slot). When the cancelled range covered chunks the user is still
-  /// looking at, the next layout's poll will re-fold them in — so user-tap
-  /// retries during heavy scrolling can throw away a network round-trip.
-  /// The trade-off favours the visible chunk the user clicked on.
+  /// When the requested chunk is already covered by an in-flight fetch this
+  /// is a no-op — the running request will resolve it. Otherwise any
+  /// in-flight fetch is cancelled and replaced with the single-chunk
+  /// request; that trade-off favours the visible chunk the user clicked on.
   ///
   /// No-op when the chunk is already loaded successfully. When the chunk
   /// does not exist yet, a fresh fetch is launched.
   void retryChunk(int messageId) {
+    if (_disposed) return;
     final chunkIndex = ChatScrollChunk.chunkOf(messageId);
     final chunk = _chunks[chunkIndex];
     if (chunk != null && chunk.status.isValid) return;
 
+    // If a fetch is already in flight that covers this chunk, let it
+    // resolve — the user tap mustn't trash an in-progress network round-trip
+    // that is about to satisfy the same request.
+    if (_fetchToken != null &&
+        chunkIndex >= _fetchingMinChunk &&
+        chunkIndex <= _fetchingMaxChunk) {
+      return;
+    }
+
     _cancelFetch();
+    // Reset per-chunk failure state so the UI sees the user-initiated retry
+    // as a fresh attempt rather than continuing the previous counter.
+    if (chunk != null) {
+      chunk
+        ..failedAttempts = 0
+        ..lastError = null;
+    }
     _fetchRetryStep = 0;
     _fetchingMinChunk = chunkIndex;
     _fetchingMaxChunk = chunkIndex;
@@ -352,7 +399,15 @@ abstract class ChatDataSource {
       for (final ci in _fetchingChunks) {
         final chunk = _chunks[ci];
         if (chunk == null) continue;
-        chunk.status = chunk.status.remove(ChatMessageStatus.fetching);
+        // Re-mark as dirty: a cancelled fetch leaves us without valid data
+        // for this chunk. Without `dirty`, an `error`-only chunk that we
+        // were retrying would land back on status `0` (= valid) while
+        // `lastError`/`failedAttempts` still describe the prior failure —
+        // any consumer reading `status.isValid && lastError != null` would
+        // render a stale error on a "healthy" chunk.
+        chunk.status = chunk.status
+            .remove(ChatMessageStatus.fetching)
+            .add(ChatMessageStatus.dirty);
         changed = true;
       }
       _fetchingChunks.clear();
@@ -366,8 +421,22 @@ abstract class ChatDataSource {
   }
 
   void _executeFetch() {
+    if (_disposed) return;
+    // Sentinel guard: if the caller dispatched without having set the range
+    // (or a reentrant cancel zeroed it), bail rather than emit a bogus
+    // `fetchRange(0, -1+kSize-1)` to the subclass.
+    if (_fetchingMaxChunk < _fetchingMinChunk) return;
+
     final token = Object();
     _fetchToken = token;
+    // Compute the network range before notifying listeners — a synchronous
+    // listener that calls `cancelFetch()` / `invalidate()` resets the range,
+    // and we must not dispatch a request derived from the post-cancel state.
+    final fromId = ChatScrollChunk.firstIdOf(_fetchingMinChunk);
+    final toId =
+        ChatScrollChunk.firstIdOf(_fetchingMaxChunk) +
+        ChatScrollChunk.kSize -
+        1;
 
     // Pre-create only the chunks that actually need loading and mark them
     // `fetching`. Valid chunks in the middle of the bounding range stay
@@ -385,14 +454,23 @@ abstract class ChatDataSource {
       _fetchingChunks.add(ci);
     }
     notifyDataChanged();
+    // Listener may have cancelled us reentrantly. Bail before dispatching to
+    // the subclass — the cancel already cleared `_fetchingChunks` and reset
+    // `_fetchToken` to null.
+    if (_fetchToken != token) return;
 
-    final fromId = ChatScrollChunk.firstIdOf(_fetchingMinChunk);
-    final toId =
-        ChatScrollChunk.firstIdOf(_fetchingMaxChunk) +
-        ChatScrollChunk.kSize -
-        1;
+    // Subclasses are expected to return a Future, but a misbehaving
+    // implementation that throws synchronously before producing one would
+    // otherwise bubble the throw up into the viewport's layout poll. Wrap
+    // it into a rejected Future so the normal error path runs.
+    Future<List<IChatMessage>> request;
+    try {
+      request = fetchRange(fromId: fromId, toId: toId);
+    } catch (error) {
+      request = Future<List<IChatMessage>>.error(error);
+    }
 
-    fetchRange(fromId: fromId, toId: toId).then(
+    request.then(
       (messages) {
         if (_fetchToken != token) return; // cancelled or replaced
         _fetchToken = null;
@@ -477,12 +555,25 @@ abstract class ChatDataSource {
     }
   }
 
+  /// Whether [dispose] has been called. After dispose every mutating entry
+  /// point ([requestChunks], [retryChunk], [invalidate], [upsertMessage],
+  /// [upsertMessages], [cancelFetch]) becomes a silent no-op so a stale
+  /// reference cannot resurrect network work or notify torn-down listeners.
+  bool get isDisposed => _disposed;
+  bool _disposed = false;
+
   /// Cancel any in-flight fetch / retry timer and drop all listeners. Call
   /// from the owning widget's `dispose` so the retry timer cannot resurrect
-  /// network work after the viewport is gone.
+  /// network work after the viewport is gone. Idempotent — safe to call
+  /// twice.
+  @mustCallSuper
   void dispose() {
+    if (_disposed) return;
     _cancelFetch();
     _dataListeners.clear();
     _boundaryListeners.clear();
+    _chunks.clear();
+    _fetchingChunks.clear();
+    _disposed = true;
   }
 }

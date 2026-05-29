@@ -10,6 +10,16 @@ import 'package:flutter/foundation.dart' show Listenable, VoidCallback;
 /// Lives outside the render tree — survives render eviction and can be
 /// queried by external UI (toolbar, copy button). Implements [Listenable]
 /// so the widget-based viewport can drive `ListenableBuilder` directly.
+///
+/// ### Swapping conversations
+///
+/// Selection is a bare `Set<int>` of message ids — it has no notion of
+/// *which* conversation those ids belong to. When the consumer swaps the
+/// `ChatDataSource` (e.g. opening a different chat thread on the same
+/// viewport) the previously-selected ids stay in the set and will now
+/// silently match unrelated messages in the new conversation. Call [clear]
+/// from your own dataSource-swap logic, or scope a separate
+/// [ChatSelectionController] per conversation, to avoid this footgun.
 class ChatSelectionController implements Listenable {
   final _selectedIds = HashSet<int>();
 
@@ -65,6 +75,19 @@ class ChatSelectionController implements Listenable {
     }
   }
 
-  /// Drop all listeners. Call from the owning widget's `dispose`.
-  void dispose() => _listeners.clear();
+  /// Whether [dispose] has been called.
+  bool get isDisposed => _disposed;
+  bool _disposed = false;
+
+  /// Drop all listeners. Call from the owning widget's `dispose`. Idempotent
+  /// — safe to call twice.
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _listeners.clear();
+    // Drop the set: a stale reference held by a consumer (e.g. a toolbar
+    // queueing an undo) must not silently match unrelated ids in a fresh
+    // conversation that happens to reuse the same numeric range.
+    _selectedIds.clear();
+  }
 }

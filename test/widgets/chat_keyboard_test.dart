@@ -193,6 +193,82 @@ void main() {
       expect(controller.anchorMessageId, ds.oldestKnownId);
     });
 
+    testWidgets('reverse mode: PageUp / ArrowUp still reveal older history', (
+      tester,
+    ) async {
+      // Regression: `_olderSign` used to flip with `reverse`, sending PageUp
+      // / ArrowUp toward newer messages because `controller.scrollBy` is
+      // anchor-relative (its sign does not flip with reverse).
+      const count = 256;
+      final controller = ChatScrollController()..jumpTo(count ~/ 2);
+      final ds = _PreloadedDataSource(count);
+      addTearDown(controller.dispose);
+      addTearDown(ds.dispose);
+
+      await tester.pumpWidget(_scaffold(
+        dataSource: ds,
+        controller: controller,
+        reverse: true,
+      ));
+      await tester.pumpAndSettle();
+
+      final offsetBefore = controller.anchorPixelOffset;
+
+      // ArrowUp must reveal *older* — anchor's pixelOffset increases (older
+      // content scrolls into view from above), regardless of `reverse`.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pumpAndSettle();
+      expect(controller.anchorPixelOffset, closeTo(offsetBefore + 60, 0.1));
+
+      // PageUp: same direction, larger step (viewport 600 * 0.85 = 510).
+      await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
+      await tester.pumpAndSettle();
+      expect(
+        controller.anchorPixelOffset,
+        closeTo(offsetBefore + 60 + 510, 0.5),
+      );
+    });
+
+    testWidgets('tap on the viewport claims focus and enables shortcuts', (
+      tester,
+    ) async {
+      // Regression: with `autofocus: false` and the FocusNode private, the
+      // user had no way to activate shortcuts after the first tap — the
+      // wrapper has to grab focus on pointer-down.
+      const count = 256;
+      final controller = ChatScrollController()..jumpTo(count ~/ 2);
+      final ds = _PreloadedDataSource(count);
+      addTearDown(controller.dispose);
+      addTearDown(ds.dispose);
+
+      await tester.pumpWidget(
+        _scaffold(dataSource: ds, controller: controller, autofocus: false),
+      );
+      await tester.pumpAndSettle();
+
+      // Pre-tap: key dispatch is a no-op because focus is elsewhere.
+      final before = controller.anchorPixelOffset;
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      expect(
+        controller.anchorPixelOffset,
+        before,
+        reason: 'no scroll without focus',
+      );
+
+      // Tap inside the viewport. The Listener wrapper must request focus
+      // so subsequent key events drive the shortcuts.
+      await tester.tapAt(const Offset(400, 300));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      expect(
+        controller.anchorPixelOffset,
+        closeTo(before - 60, 0.1),
+        reason: 'shortcuts should be live after pointer-down acquired focus',
+      );
+    });
+
     testWidgets('scrollBy listener fires on key events', (tester) async {
       const count = 256;
       final controller = ChatScrollController()..jumpTo(count ~/ 2);

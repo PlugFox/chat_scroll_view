@@ -224,5 +224,74 @@ void main() {
         reason: 'the header should follow the topmost message into later days',
       );
     });
+
+    testWidgets('tap inside the floating header reaches its builder', (
+      tester,
+    ) async {
+      // Regression: the floating header paints on top of messages but used to
+      // be excluded from hit-testing — any tap target inside the header
+      // builder (jump-to-date pill, dismiss button) was dead and the tap
+      // fell through to the message underneath.
+      const count = 256;
+      // jumpTo(50) so the floating header pins at y=0..24 over msg-50, and
+      // every visible inline separator sits well below the header zone.
+      final controller = ChatScrollController()..jumpTo(50);
+      var headerTaps = 0;
+      var messageTaps = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 400,
+                height: 600,
+                child: ChatScrollView(
+                  dataSource: _PreloadedDataSource(_generate(count)),
+                  controller: controller,
+                  messageBuilder: (context, id, message, status) => SizedBox(
+                    height: 60,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => messageTaps++,
+                      child: Text('msg-$id'),
+                    ),
+                  ),
+                  dateSeparatorBuilder: (context, date) => SizedBox(
+                    height: 24,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => headerTaps++,
+                      child: Text('hdr-${date.month}-${date.day}'),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // The floating header sits at y=0..24, x=200..600 (Center inside an
+      // 800x600 test surface). Tap inside that zone — msg-50 paints under
+      // the header at the same position; the header must intercept.
+      await tester.tapAt(const Offset(400, 12));
+      await tester.pump();
+      expect(headerTaps, 1, reason: 'floating header should receive the tap');
+      expect(
+        messageTaps,
+        0,
+        reason: 'message under the header must not receive the tap',
+      );
+
+      // Sanity: a tap well below the header zone reaches the underlying
+      // message, proving messageTaps is wired and the header is not
+      // swallowing all taps.
+      await tester.tapAt(const Offset(400, 100));
+      await tester.pump();
+      expect(messageTaps, 1);
+      expect(headerTaps, 1, reason: 'no double-count');
+    });
   });
 }

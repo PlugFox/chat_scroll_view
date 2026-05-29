@@ -53,14 +53,24 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
   Future<void> _init() async {
     try {
       final comments = await CommentsDataSource.load();
+      // The screen may have been popped while `load()` was in flight. The
+      // `dispose()` above already ran with `_dataSource == null`, so we
+      // would otherwise assign the newly-loaded source into the dead State
+      // and never free it.
+      if (!mounted) {
+        comments.dispose();
+        return;
+      }
       _dataSource = comments;
       _configure(comments.manifest.totalMessages);
     } on Object {
+      if (!mounted) return;
       const count = 4000;
       _dataSource = _DemoDataSource(messageCount: count);
       _configure(count);
     }
-    if (mounted) setState(() => _loading = false);
+    if (!mounted) return;
+    setState(() => _loading = false);
   }
 
   void _configure(int count) {

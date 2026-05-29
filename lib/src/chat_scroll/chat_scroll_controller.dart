@@ -48,6 +48,7 @@ class ChatScrollController {
 
   /// Jump to a specific message, resetting the anchor.
   void jumpTo(int messageId) {
+    if (_disposed) return;
     _anchorMessageId = messageId;
     _anchorPixelOffset = 0.0;
     // Iterate a snapshot — a listener may add or remove listeners (including
@@ -87,14 +88,17 @@ class ChatScrollController {
   ///
   /// **`scrollBy(0.0)` is a silent no-op** — listeners are not notified
   /// and `ChatProgrammaticScroll` is not emitted. If a consumer counts
-  /// notifications, account for the zero short-circuit.
+  /// notifications, account for the zero short-circuit. Non-finite values
+  /// (NaN / ±∞) are also dropped silently — they would otherwise poison
+  /// the anchor for the rest of the controller's lifetime.
   ///
   /// To navigate to a specific message id use [jumpTo] or [animateTo]
   /// instead. To know "what's N viewport-heights away" the consumer needs
   /// the current viewport size, which the controller does not own — fold
   /// that into [pixels] at the call site.
   void scrollBy(double pixels) {
-    if (pixels == 0.0) return;
+    if (_disposed) return;
+    if (pixels == 0.0 || !pixels.isFinite) return;
     _anchorPixelOffset += pixels;
     for (final cb in List<ValueChanged<double>>.of(
       _scrollByListeners,
@@ -117,6 +121,7 @@ class ChatScrollController {
     Duration duration = const Duration(milliseconds: 300),
     Curve curve = Curves.easeInOutCubic,
   }) async {
+    if (_disposed) return;
     final animator = _animator;
     if (animator == null) {
       jumpTo(messageId);
@@ -151,7 +156,10 @@ class ChatScrollController {
   /// Viewport-only setter — `RenderChatScrollView` pushes the latest range
   /// after every layout / Tier-1 reposition.
   @internal
-  set visibleRange(ChatVisibleRange? value) => _visibleRange.value = value;
+  set visibleRange(ChatVisibleRange? value) {
+    if (_disposed) return;
+    _visibleRange.value = value;
+  }
 
   // --- Tail tracking -------------------------------------------------------
 
@@ -180,7 +188,10 @@ class ChatScrollController {
   /// Viewport-only setter — `RenderChatScrollView` pushes after every
   /// layout / Tier-1 reposition.
   @internal
-  set isAtTail(bool value) => _isAtTail.value = value;
+  set isAtTail(bool value) {
+    if (_disposed) return;
+    _isAtTail.value = value;
+  }
 
   // --- Scroll events -------------------------------------------------------
 
@@ -225,6 +236,7 @@ class ChatScrollController {
   /// Called by the viewport from the Ticker callback.
   @internal
   void applyScrollDelta(double delta) {
+    if (_disposed) return;
     _anchorPixelOffset += delta;
   }
 
@@ -232,16 +244,29 @@ class ChatScrollController {
   /// Called by the viewport during anchor renormalization inside performLayout.
   @internal
   void reassignAnchor(int messageId, double pixelOffset) {
+    if (_disposed) return;
     _anchorMessageId = messageId;
     _anchorPixelOffset = pixelOffset;
   }
 
+  /// Whether [dispose] has been called. Exposed so callers that share a
+  /// controller across short-lived widgets can guard against double-dispose.
+  bool get isDisposed => _disposed;
+  bool _disposed = false;
+
   /// Drop all listeners. Call from the owning widget's `dispose` so a stray
-  /// late notification cannot reach a torn-down listener.
+  /// late notification cannot reach a torn-down listener. Idempotent — safe
+  /// to call twice.
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     _jumpListeners.clear();
     _scrollListeners.clear();
     _scrollByListeners.clear();
+    // Drop the animator binding — a pending `await animator.animate(...)`
+    // from a previous `animateTo` returning after dispose must not mutate
+    // anchor state through a stale reference.
+    _animator = null;
     _visibleRange.dispose();
     _isAtTail.dispose();
   }

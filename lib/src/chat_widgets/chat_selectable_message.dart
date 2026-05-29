@@ -78,13 +78,21 @@ class _SelectableMessageState extends State<SelectableMessage>
   @override
   void didUpdateWidget(SelectableMessage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.controller, widget.controller)) {
+    final controllerSwapped = !identical(
+      oldWidget.controller,
+      widget.controller,
+    );
+    final idSwapped = oldWidget.id != widget.id;
+    if (controllerSwapped) {
       oldWidget.controller.removeListener(_onSelectionChanged);
       widget.controller.addListener(_onSelectionChanged);
     }
-    // The id is keyed by the viewport, so it is stable for a given element;
-    // re-sync defensively in case a controller / id swap ever happens.
-    _onSelectionChanged();
+    // Only re-sync when something the animation depends on actually changed.
+    // Parent rebuilds with the same id+controller would otherwise enqueue
+    // animation work for every visible message every frame.
+    if (controllerSwapped || idSwapped) {
+      _onSelectionChanged();
+    }
   }
 
   @override
@@ -105,8 +113,12 @@ class _SelectableMessageState extends State<SelectableMessage>
   }
 
   void _handleLongPress() {
+    final c = widget.controller;
+    // Already selected: long-press on an already-selected message is a no-op
+    // for the controller, so don't buzz either.
+    if (c.isSelected(widget.id)) return;
     HapticFeedback.selectionClick();
-    widget.controller.startSelection(widget.id);
+    c.startSelection(widget.id);
   }
 
   void _handleTap() {
@@ -139,15 +151,17 @@ class _SelectableMessageState extends State<SelectableMessage>
 
     return Stack(
       children: <Widget>[
-        // Full-row selection tint — a no-op paint while the message is not
-        // selected. The viewport lays every message out at the full viewport
-        // width (each message centers its own content column), so this spans
-        // the whole row without bleeding past a narrower box.
-        Positioned.fill(
-          child: IgnorePointer(
-            child: ColoredBox(color: accent.withValues(alpha: 0.13 * s)),
+        // Full-row selection tint. Skipped entirely when the message is not
+        // selected — a `ColoredBox` with alpha 0 still records a paint op,
+        // and for a 256-msg viewport that adds up. The viewport lays every
+        // message out at the full viewport width, so when shown this tint
+        // spans the whole row without bleeding past a narrower box.
+        if (s > 0.0)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: ColoredBox(color: accent.withValues(alpha: 0.13 * s)),
+            ),
           ),
-        ),
         Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: <Widget>[

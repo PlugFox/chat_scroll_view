@@ -17,8 +17,11 @@ import 'package:flutter/widgets.dart';
 ///   oldest is unknown (initial load).
 /// * `End` — `controller.jumpTo(dataSource.newestKnownId)`.
 ///
-/// Direction-flipping when `reverse` is `true` (chat-style stacking) — so
-/// `PageUp` still reveals *older* messages, which is what chat users expect.
+/// `controller.scrollBy` is anchor-relative, so PageUp / ArrowUp always
+/// reveal older history in both layouts — no direction flip is needed for
+/// scroll. Home / End target ids do flip with [reverse]: in a chat-style
+/// layout Home lands on the newest (top of the reverse stack), End on the
+/// oldest.
 ///
 /// ### Focus
 ///
@@ -27,6 +30,11 @@ import 'package:flutter/widgets.dart';
 /// autofocused wrapper here would silently steal the cursor and force the
 /// user to tap the input before typing. Pass `autofocus: true` when the
 /// wrapper is the only focusable on the route.
+///
+/// Tapping or clicking the wrapped child also requests focus on the
+/// internal node, so the shortcuts become live after the user interacts
+/// with the chat even when [autofocus] is `false`. Focus is *not* re-
+/// requested if the wrapper already owns it (no churn for repeated taps).
 ///
 /// ### Example
 ///
@@ -102,16 +110,16 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
 
   late final Map<Type, Action<Intent>> _actions = <Type, Action<Intent>>{
     _ScrollLineUpIntent: CallbackAction<_ScrollLineUpIntent>(
-      onInvoke: (_) => _onScrollLines(_olderSign),
+      onInvoke: (_) => _onScrollLines(_scrollOlderSign),
     ),
     _ScrollLineDownIntent: CallbackAction<_ScrollLineDownIntent>(
-      onInvoke: (_) => _onScrollLines(_newerSign),
+      onInvoke: (_) => _onScrollLines(_scrollNewerSign),
     ),
     _ScrollPageUpIntent: CallbackAction<_ScrollPageUpIntent>(
-      onInvoke: (_) => _onScrollPage(_olderSign),
+      onInvoke: (_) => _onScrollPage(_scrollOlderSign),
     ),
     _ScrollPageDownIntent: CallbackAction<_ScrollPageDownIntent>(
-      onInvoke: (_) => _onScrollPage(_newerSign),
+      onInvoke: (_) => _onScrollPage(_scrollNewerSign),
     ),
     _JumpHomeIntent: CallbackAction<_JumpHomeIntent>(
       onInvoke: (_) => _onJumpHome(),
@@ -133,11 +141,13 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
     super.dispose();
   }
 
-  /// Sign for keys whose intuition is "go back in time" (PageUp, ArrowUp,
-  /// Home in non-reverse layouts). Reverse mode flips it so PageUp still
-  /// reveals older history.
-  int get _olderSign => widget.reverse ? -1 : 1;
-  int get _newerSign => -_olderSign;
+  /// Scroll sign for keys whose intuition is "go back in time" (PageUp,
+  /// ArrowUp). `controller.scrollBy` is *anchor*-relative — its sign does
+  /// not flip with `reverse` (the message-id direction is the same in
+  /// both layouts; `reverse` only changes short-content stacking and a11y
+  /// labelling). So PageUp / ArrowUp always pass `+lineExtent / +step`.
+  static const int _scrollOlderSign = 1;
+  static const int _scrollNewerSign = -1;
 
   Object? _onScrollLines(int sign) {
     widget.controller.scrollBy(widget.lineExtent * sign);
@@ -153,6 +163,10 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
   }
 
   Object? _onJumpHome() {
+    // In a chat-style (`reverse: true`) layout Home conventionally lands on
+    // the most recent message — the top of a reverse-stacked list — so the
+    // jump-target ids flip with reverse even though the scroll signs do
+    // not.
     final id = widget.reverse
         ? widget.dataSource.newestKnownId
         : widget.dataSource.oldestKnownId;
@@ -168,6 +182,33 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
     return null;
   }
 
+  /// Translucent pointer-down handler that grabs focus when the user taps
+  /// or clicks anywhere inside the viewport. Without this the shortcuts
+  /// are dead until the wrapper is focused by traversal — `autofocus` is
+  /// off by default so the composer keeps focus on mount, but the user
+  /// still expects a tap on the chat to make arrow keys work.
+  ///
+  /// The translucent `Listener` always fires regardless of who else
+  /// consumed the pointer, so a tap on a focusable descendant (e.g. an
+  /// inline reply input, a focusable selectable text inside a message)
+  /// would otherwise have its focus immediately yanked back to the
+  /// wrapper. Skip the grab when focus already landed inside our subtree.
+  void _handlePointerDown(PointerDownEvent _) {
+    if (_focusNode.hasFocus) return;
+    final scope = _focusNode.enclosingScope;
+    final focused = scope?.focusedChild ?? FocusManager.instance.primaryFocus;
+    if (focused != null && focused != _focusNode) {
+      // Walk up: if the current primary focus sits inside our subtree, the
+      // descendant intentionally claimed focus on this tap. Leave it alone.
+      FocusNode? n = focused;
+      while (n != null) {
+        if (n == _focusNode) return;
+        n = n.parent;
+      }
+    }
+    _focusNode.requestFocus();
+  }
+
   @override
   Widget build(BuildContext context) => Shortcuts(
     shortcuts: _kShortcuts,
@@ -176,7 +217,11 @@ class _ChatKeyboardShortcutsState extends State<ChatKeyboardShortcuts> {
       child: Focus(
         focusNode: _focusNode,
         autofocus: widget.autofocus,
-        child: widget.child,
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: _handlePointerDown,
+          child: widget.child,
+        ),
       ),
     ),
   );

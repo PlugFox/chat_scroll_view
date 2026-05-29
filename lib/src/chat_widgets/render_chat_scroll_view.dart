@@ -146,11 +146,26 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
         ..removeDataListener(_onDataChanged)
         ..removeBoundaryListener(_onBoundaryChanged);
     }
-    // The old data source's in-flight fetch (and any pending retry) refers to
-    // chunks we no longer read — let it stop instead of resolving into an
-    // orphan, and avoid a dangling Timer on detach.
-    _dataSource.cancelFetch();
+    // Don't cancel the OLD source's in-flight fetch — the consumer may be
+    // sharing it with another viewport (split-pane chat, brief route-
+    // transition coexistence). The old source's results landing into its
+    // own chunks is harmless; we just stop listening. The consumer owns the
+    // source's lifecycle and calls `dispose()` when truly done.
     _dataSource = value;
+    // Reset state that was implicitly scoped to the previous source:
+    //   * follow-tail snapshot — the old `newest > _lastSeenNewestId` test
+    //     would otherwise compare ids across unrelated conversations and
+    //     auto-pin (or fail to auto-pin) on first layout of the new source.
+    //   * floating-header bucket / date — belongs to the old data; the new
+    //     source has a different grouping.
+    //   * laid-out chunk range — the next layout publishes fresh values.
+    _wasAtTailLastLayout = false;
+    _lastSeenNewestId = null;
+    _headerBucket = null;
+    _headerDate = null;
+    _headerDirty = true;
+    _layoutMinChunk = 0;
+    _layoutMaxChunk = -1;
     if (attached) {
       _dataSource
         ..addDataListener(_onDataChanged)
@@ -164,8 +179,16 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   set controller(ChatScrollController value) {
     if (identical(_controller, value)) return;
     if (attached) {
+      // Cancel a mid-flight fling too — its next tick would apply
+      // `_simulation.x(seconds) - _lastFlingValue` to the NEW controller's
+      // anchor, continuing motion across an unrelated controller swap.
+      _cancelFling();
       _cancelAnimate();
       _cancelBounceback();
+      // Clear any leftover post-animateTo highlight — its target id refers
+      // to a message position resolved against the old controller's anchor;
+      // painting it under the new controller would tint an arbitrary row.
+      _clearHighlight();
       // Mid-drag controller swap: the new controller would otherwise see
       // `_dragInProgress=true` with no matching `ChatUserDragStart`, and
       // the next layout's `_clampBoundaries` would stay suspended.
@@ -433,7 +456,13 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   set highlightDuration(Duration value) {
     if (_highlightDuration == value) return;
     _highlightDuration = value;
-    if (_highlightTargetId != null) markNeedsPaint();
+    // An in-flight fade computes `t = elapsed / total`; swapping `total`
+    // without rebasing `_highlightStartTime` makes `t` jump discontinuously
+    // on the next tick. Easier and more honest: drop the active highlight
+    // — the new duration is "from now on", not "retroactively reshape the
+    // existing fade". `Duration.zero` clears synchronously so a hard
+    // opt-out doesn't have to wait for the next ticker frame.
+    if (_highlightTargetId != null) _clearHighlight();
   }
 
   /// Configurable: peak colour of the highlight overlay. Faded to fully
@@ -644,6 +673,12 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _pollTimer = null;
     // Drop our listener first — cancelFetch notifies, and a `markNeedsLayout`
     // on a detaching render object is brittle even if currently harmless.
+    // We do cancel the running fetch / retry timer here: the dominant case is
+    // a single viewport owning a single data source, and a viewport removal
+    // should not leave a background retry storm running. Consumers that
+    // share one source across viewports must reattach into a new viewport
+    // synchronously, or accept the cancelled fetch (it'll be re-armed by
+    // the new viewport's first layout).
     _dataSource
       ..removeDataListener(_onDataChanged)
       ..removeBoundaryListener(_onBoundaryChanged);
@@ -736,6 +771,11 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // passive spring-back. Otherwise the bounceback keeps pulling against
     // the new anchor offset for the rest of its window.
     _cancelBounceback();
+    // Drop any drag delta accumulated since the last tick: the controller
+    // has already shifted the anchor by `delta`; applying the pending drag
+    // on top would make the drag appear to accelerate by `delta` for one
+    // frame. The user keeps dragging from the new anchor.
+    _pendingScrollDelta = 0.0;
     markNeedsLayout();
   }
 
@@ -938,6 +978,11 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _pendingScrollDelta = 0.0;
     _cancelFling();
     _cancelAnimate();
+    // The overlay-branch `_clearHighlight()` in `_onTick` is unreachable
+    // once the ticker has stopped — clear here so a highlight that was
+    // alive when the viewport entered overlay mode does not survive across
+    // the transition and tint a re-mounted target id on the next paint.
+    _clearHighlight();
     // Clear drag + bounceback state so that the next normal-mode layout's
     // `_clampBoundaries` is not silently suppressed by stale flags. The
     // ticker is about to stop, so the overlay branch of `_onTick` can no
@@ -2118,6 +2163,25 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     }
 
     final viewportHeight = size.height;
+    // Floating day header: paints on top of every message and chunk-error
+    // tile (see `_paintContents`). Hit-test first in the inverse-paint order
+    // so a tap target inside the header builder — jump-to-date pill, dismiss
+    // affordance, etc. — actually fires instead of falling through to the
+    // message under it.
+    final header = _floatingHeader;
+    if (header != null) {
+      final headerOffset = _parentData(header).offset;
+      final headerBottom = headerOffset + header.size.height;
+      if (headerOffset < viewportHeight && headerBottom > 0) {
+        final hit = result.addWithPaintOffset(
+          offset: Offset(0, headerOffset),
+          position: position,
+          hitTest: (BoxHitTestResult innerResult, Offset transformed) =>
+              header.hitTest(innerResult, position: transformed),
+        );
+        if (hit) return true;
+      }
+    }
     // Mirror paint order: chunk-error tiles paint on top of message tiles
     // (the second paint loop). Hit-test them first so a tap on the Retry
     // button is not absorbed by a co-existing message tile during a

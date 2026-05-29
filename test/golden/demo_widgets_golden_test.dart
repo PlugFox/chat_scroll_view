@@ -1,6 +1,8 @@
 @Tags(<String>['golden'])
 library;
 
+import 'dart:io' show Platform;
+
 import 'package:chatscrollview/src/chat_message.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/date_separator.dart';
 import 'package:chatscrollview/src/chat_widgets/demo/demo_message.dart';
@@ -9,10 +11,19 @@ import 'package:flutter_test/flutter_test.dart';
 
 // Golden tests run only on Linux — the project's reference platform. Other
 // platforms render fonts and anti-aliasing differently enough to trip the
-// exact-pixel default comparator. Skip elsewhere and document the rule.
+// exact-pixel default comparator. The group is `skip`-gated below so a
+// plain `flutter test` on macOS/Windows leaves the baselines untouched
+// instead of failing on platform drift.
 //
-// To refresh the baselines after an intentional visual change run:
+// To refresh the baselines after an intentional visual change run, on Linux:
 //   flutter test --update-goldens test/golden/demo_widgets_golden_test.dart
+
+/// Non-null when the host platform is not the golden-reference one — passed
+/// as the `skip` argument so the test reporter prints a single `[SKIPPED]`
+/// line per case explaining why.
+final String? _platformSkip = Platform.isLinux
+    ? null
+    : 'Golden baselines are Linux-only; skipping on ${Platform.operatingSystem}.';
 
 UserChatMessage _msg({
   required String sender,
@@ -45,7 +56,7 @@ Widget _box({
 );
 
 void main() {
-  group('demo widget goldens', () {
+  group('demo widget goldens', skip: _platformSkip, () {
     testWidgets('incoming message bubble', (tester) async {
       await tester.pumpWidget(_box(
         child: DemoMessageBubble(

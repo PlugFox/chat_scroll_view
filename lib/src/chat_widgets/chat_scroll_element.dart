@@ -89,17 +89,25 @@ class ChatScrollElement extends RenderObjectElement
     // Use `==` instead of `identical` — instance-method tear-offs are equal
     // across accesses but not necessarily identical, so `identical` here
     // would force every parent rebuild to throw away the skip-cache.
+    //
+    // `textDirection` is included: the explicit override changes the
+    // ambient Directionality that wraps every message subtree (see
+    // [_buildWidget]). Without dropping the cache, already-built messages
+    // would keep the old direction until their data changes.
     if (old.messageBuilder != newWidget.messageBuilder ||
         old.selectionController != newWidget.selectionController ||
-        old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder) {
+        old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder ||
+        old.textDirection != newWidget.textDirection) {
       _builtMessage.clear();
       _builtStatus.clear();
       _builtStartsDay.clear();
       renderObject.markNeedsLayout();
     }
-    // A changed separator builder must rebuild the header even if the day did
-    // not change — the day-bucket gate alone would skip it.
-    if (old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder) {
+    // A changed separator builder *or* direction must rebuild the header
+    // even if the day did not change — the day-bucket gate alone would
+    // skip it.
+    if (old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder ||
+        old.textDirection != newWidget.textDirection) {
       renderObject.invalidateFloatingHeader();
     }
     // A swapped chunkErrorBuilder must re-inflate every visible chunk-error
@@ -118,38 +126,54 @@ class ChatScrollElement extends RenderObjectElement
   /// stacked above the body, *outside* [SelectableMessage] so selection chrome
   /// never tints the date. Plain messages are wrapped in a [RepaintBoundary]
   /// for picture / layer caching; [DatedMessage] does its own wrapping.
+  ///
+  /// When an explicit `textDirection` override is supplied on
+  /// `ChatScrollView`, [messageBuilder] and the date-separator builder are
+  /// invoked inside a `Builder` sitting *under* a [Directionality] with the
+  /// override — so builders that follow the documented
+  /// `Directionality.of(context)` pattern read the same direction the
+  /// viewport uses for its chrome. Without the wrap, bubble alignment
+  /// would silently disagree with the scrollbar mirroring.
   Widget _buildWidget(
     int id,
     IChatMessage? message,
     ChatMessageStatus status,
     bool startsNewDay,
   ) {
-    Widget content = _widget.messageBuilder(this, id, message, status);
+    final override = _widget.textDirection;
     final selection = _widget.selectionController;
-    if (selection != null) {
-      content = SelectableMessage(
-        id: id,
-        controller: selection,
-        child: content,
+    final separator = _widget.dateSeparatorBuilder;
+    final hasDateHeader =
+        startsNewDay && separator != null && message != null;
+
+    Widget compose(BuildContext context) {
+      Widget content = _widget.messageBuilder(context, id, message, status);
+      if (selection != null) {
+        content = SelectableMessage(
+          id: id,
+          controller: selection,
+          child: content,
+        );
+      }
+      return hasDateHeader
+          ? DatedMessage(
+              key: ValueKey<int>(id),
+              separator: separator(context, message.createdAt),
+              body: content,
+            )
+          : RepaintBoundary(key: ValueKey<int>(id), child: content);
+    }
+
+    if (override != null) {
+      // Builder installs a descendant BuildContext so `compose` runs *under*
+      // the Directionality; calling `messageBuilder(this, ...)` would have
+      // resolved Directionality.of against the ambient ancestor instead.
+      return Directionality(
+        textDirection: override,
+        child: Builder(builder: compose),
       );
     }
-    final separator = _widget.dateSeparatorBuilder;
-    final inner = (startsNewDay && separator != null && message != null)
-        ? DatedMessage(
-            key: ValueKey<int>(id),
-            separator: separator(this, message.createdAt),
-            body: content,
-          )
-        : RepaintBoundary(key: ValueKey<int>(id), child: content);
-    // Honour the explicit `textDirection` override on `ChatScrollView`: when
-    // set, install it so `messageBuilder` reads the same direction the
-    // viewport uses for scrollbar mirroring. Without this wrap the bubble
-    // alignment would silently disagree with the chrome.
-    final override = _widget.textDirection;
-    if (override != null) {
-      return Directionality(textDirection: override, child: inner);
-    }
-    return inner;
+    return compose(this);
   }
 
   // --- ChatChildManager (driven by RenderChatScrollView.performLayout) ------

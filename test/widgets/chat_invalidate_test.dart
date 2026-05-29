@@ -32,13 +32,8 @@ class _ProgrammableDataSource extends ChatDataSource {
       reachedOldest: true,
       reachedNewest: true,
     );
-    // `upsertMessage` doesn't touch chunk status; freshly-created chunks
-    // start in `dirty`, which would trigger an immediate poll-fetch. The
-    // test fixture wants them treated as preloaded data, so promote each
-    // chunk to `valid`.
-    for (final chunk in chunks.values) {
-      chunk.status = ChatMessageStatus.valid;
-    }
+    // `upsertMessage` marks freshly-created chunks as valid (the upsert is
+    // the source of truth), so no manual chunk-status promotion is needed.
   }
 
   int fetchCalls = 0;

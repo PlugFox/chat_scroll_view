@@ -44,9 +44,16 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
     super.initState();
     widget.controller.isAtTail.addListener(_onIsAtTailChanged);
     widget.dataSource.addBoundaryListener(_onBoundaryChanged);
-    if (widget.controller.isAtTail.value) {
-      _lastSeenNewestId = widget.dataSource.newestKnownId;
-    }
+    // Seed the "last seen" baseline unconditionally — `isAtTail` starts as
+    // `false` and is only pushed `true` after the first layout, so gating
+    // the snapshot on it leaves the baseline `null` for the entire session
+    // when the consumer mounts the pill at a non-tail position (e.g. a
+    // permalink to an older message). With a `null` baseline `_unseenCount`
+    // short-circuits to 0 and the pill silently stays hidden even when new
+    // messages have arrived. Seeding here treats "everything that exists
+    // now" as already-seen, which is the correct baseline regardless of
+    // anchor position.
+    _lastSeenNewestId = widget.dataSource.newestKnownId;
   }
 
   @override
@@ -59,9 +66,9 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
     if (!identical(old.dataSource, widget.dataSource)) {
       old.dataSource.removeBoundaryListener(_onBoundaryChanged);
       widget.dataSource.addBoundaryListener(_onBoundaryChanged);
-      _lastSeenNewestId = widget.controller.isAtTail.value
-          ? widget.dataSource.newestKnownId
-          : null;
+      // New source ⇒ re-baseline: treat everything currently known as seen
+      // (same rationale as `initState`).
+      _lastSeenNewestId = widget.dataSource.newestKnownId;
     }
   }
 
@@ -81,7 +88,18 @@ class _NewMessagesPillState extends State<NewMessagesPill> {
     setState(() {});
   }
 
-  void _onBoundaryChanged() => setState(() {});
+  void _onBoundaryChanged() {
+    // When new messages arrive while the user is already pinned at the
+    // tail, the follow-tail layout auto-scrolls them into view — they
+    // are *visible*, not unseen. `isAtTail` stays `true` across that
+    // transition so `_onIsAtTailChanged` never fires. Without this
+    // snapshot the next time the user scrolls away the pill would count
+    // those already-viewed messages as "new".
+    if (widget.controller.isAtTail.value) {
+      _lastSeenNewestId = widget.dataSource.newestKnownId;
+    }
+    setState(() {});
+  }
 
   int _unseenCount() {
     final newest = widget.dataSource.newestKnownId;

@@ -59,6 +59,11 @@ class _SelectionAppBarState extends State<SelectionAppBar>
   }
 
   void _onSelectionChanged() {
+    // Guard the entire callback: the selection controller's listener list is
+    // owned by the controller, not the State, so a late notification (e.g.
+    // controller outlives the route) can otherwise reach `_t.forward()`
+    // after `_t.dispose()` ran.
+    if (!mounted) return;
     final mode = widget.selection.isSelectionMode;
     if (mode != _mode) {
       _mode = mode;
@@ -69,7 +74,7 @@ class _SelectionAppBarState extends State<SelectionAppBar>
       }
     }
     // Rebuild for the live count even when the mode itself did not change.
-    if (mounted) setState(() {});
+    setState(() {});
   }
 
   @override
