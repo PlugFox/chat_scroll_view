@@ -266,6 +266,43 @@ abstract class ChatDataSource {
   @internal
   void cancelFetch() => _cancelFetch();
 
+  /// Mark every loaded chunk as stale so the viewport refetches them on the
+  /// next pass — lazy: in-range chunks get a fresh fetch from the poll;
+  /// off-range chunks stay dirty until visited.
+  ///
+  /// Use after a connection-state change that may have produced new data
+  /// the source missed: SSE / WebSocket reconnect, `AppLifecycleState
+  /// .resumed`, a pull-to-refresh affordance. The existing chunk data stays
+  /// in place (no flicker) until the refetch lands; consumers that want a
+  /// "loading" indicator can read `status.isDirty` from the chunk via
+  /// `statusOf(id)`.
+  ///
+  /// Cancels any in-flight fetch and retry timer — the new dirty marks
+  /// drive a fresh fetch cycle. Per-chunk `failedAttempts` and `lastError`
+  /// are reset; an errored chunk reaches the user as `dirty` again rather
+  /// than carrying the prior failure state into the new attempt.
+  void invalidate() {
+    _cancelFetch();
+    var changed = false;
+    for (final chunk in _chunks.values) {
+      // Don't overwrite a chunk that is already dirty (or fetching after a
+      // cancelFetch race) — the goal is "mark stale", not "reset to a
+      // particular flag set".
+      if (chunk.status.isValid || chunk.status.isError) {
+        chunk.status = chunk.status
+            .remove(ChatMessageStatus.error)
+            .add(ChatMessageStatus.dirty);
+        changed = true;
+      }
+      if (chunk.failedAttempts != 0 || chunk.lastError != null) {
+        chunk.failedAttempts = 0;
+        chunk.lastError = null;
+        changed = true;
+      }
+    }
+    if (changed) notifyDataChanged();
+  }
+
   /// Force an immediate re-fetch of the chunk containing [messageId],
   /// bypassing the in-flight backoff.
   ///
