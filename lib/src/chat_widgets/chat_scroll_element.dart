@@ -102,9 +102,9 @@ class ChatScrollElement extends RenderObjectElement
     if (old.dateSeparatorBuilder != newWidget.dateSeparatorBuilder) {
       renderObject.invalidateFloatingHeader();
     }
-    // A swapped errorBuilder must re-inflate every visible chunk-error tile
-    // so the new builder runs against existing slots.
-    if (old.errorBuilder != newWidget.errorBuilder &&
+    // A swapped chunkErrorBuilder must re-inflate every visible chunk-error
+    // tile so the new builder runs against existing slots.
+    if (old.chunkErrorBuilder != newWidget.chunkErrorBuilder &&
         _chunkErrors.isNotEmpty) {
       renderObject.markNeedsLayout();
     }
@@ -221,22 +221,35 @@ class ChatScrollElement extends RenderObjectElement
 
   @override
   RenderBox? buildChunkError(int chunkIndex, int firstId, int lastId) {
-    final build = _widget.errorBuilder;
     // Defensive: the render side only calls this when `hasErrorBuilder` is
     // true, but the host may have flipped the builder away on the same frame.
-    if (build == null) return null;
-    final ds = _widget.dataSource;
+    if (_widget.chunkErrorBuilder == null) return null;
     final widget = RepaintBoundary(
       key: ValueKey<({Symbol tag, int idx})>((
         tag: #chunkError,
         idx: chunkIndex,
       )),
+      // Builder reads `_widget` and the chunk at *call* time, not at *build*
+      // time — a data-source swap before the user taps Retry sends the
+      // retry to the current data source rather than the captured one, and
+      // a fresh fetch failure refreshes `error` / `attempt` on the next
+      // rebuild without re-keying the slot.
       child: Builder(
-        builder: (ctx) => build(
-          ctx,
-          (firstId: firstId, lastId: lastId),
-          () => ds.retryChunk(firstId),
-        ),
+        builder: (ctx) {
+          final ds = _widget.dataSource;
+          final chunk = ds.chunks[chunkIndex];
+          return _widget.chunkErrorBuilder!(
+            ctx,
+            (
+              chunkIndex: chunkIndex,
+              firstId: firstId,
+              lastId: lastId,
+              error: chunk?.lastError,
+              attempt: chunk?.failedAttempts ?? 0,
+              retry: () => ds.retryChunk(firstId),
+            ),
+          );
+        },
       ),
     );
     Element? updated;

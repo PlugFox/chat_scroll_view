@@ -92,12 +92,12 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
 
   Widget _buildChunkError(
     BuildContext context,
-    ChatChunkRange chunk,
-    VoidCallback retry,
+    ChatChunkErrorDetails details,
   ) => DemoChunkErrorTile(
-    firstId: chunk.firstId,
-    lastId: chunk.lastId,
-    onRetry: retry,
+    firstId: details.firstId,
+    lastId: details.lastId,
+    attempt: details.attempt,
+    onRetry: details.retry,
   );
 
   Widget _buildEmpty(BuildContext context) => const DemoEmptyState();
@@ -123,7 +123,7 @@ class _WidgetChatScreenState extends State<WidgetChatScreen> {
                 selectionController: _selection,
                 bottomPadding: _bottomInset,
                 messageBuilder: _buildMessage,
-                errorBuilder: _buildChunkError,
+                chunkErrorBuilder: _buildChunkError,
                 emptyBuilder: _buildEmpty,
                 loadingBuilder: _buildInitialSkeleton,
                 dateSeparatorBuilder: (context, date) =>

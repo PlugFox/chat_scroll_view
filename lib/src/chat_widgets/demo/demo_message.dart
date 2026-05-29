@@ -406,59 +406,66 @@ class DemoChunkErrorTile extends StatelessWidget {
     required this.firstId,
     required this.lastId,
     required this.onRetry,
+    this.attempt = 0,
     super.key,
   });
 
   final int firstId;
   final int lastId;
+  final int attempt;
   final VoidCallback onRetry;
 
   @override
-  Widget build(BuildContext context) => Center(
-    child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: _kContentMaxWidth),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: const Color(0xFF3A2A2A),
-            border: Border.all(color: const Color(0xFF6B3A3A)),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-            child: Row(
-              children: <Widget>[
-                const Icon(
-                  Icons.error_outline_rounded,
-                  size: 20,
-                  color: Color(0xFFE57373),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Failed to load messages $firstId–$lastId',
-                    style: const TextStyle(
-                      color: Color(0xFFE6E7EB),
-                      fontSize: 13,
+  Widget build(BuildContext context) {
+    final label = attempt > 1
+        ? 'Failed to load messages $firstId–$lastId (attempt $attempt)'
+        : 'Failed to load messages $firstId–$lastId';
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: _kContentMaxWidth),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: const Color(0xFF3A2A2A),
+              border: Border.all(color: const Color(0xFF6B3A3A)),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+              child: Row(
+                children: <Widget>[
+                  const Icon(
+                    Icons.error_outline_rounded,
+                    size: 20,
+                    color: Color(0xFFE57373),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: const TextStyle(
+                        color: Color(0xFFE6E7EB),
+                        fontSize: 13,
+                      ),
                     ),
                   ),
-                ),
-                TextButton(
-                  onPressed: onRetry,
-                  style: TextButton.styleFrom(
-                    foregroundColor: const Color(0xFFE57373),
-                    visualDensity: VisualDensity.compact,
+                  TextButton(
+                    onPressed: onRetry,
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFFE57373),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('Retry'),
                   ),
-                  child: const Text('Retry'),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 // --- Empty state ----------------------------------------------------------

@@ -271,18 +271,20 @@ abstract class ChatDataSource {
   ///
   /// Intended for UI retry — the user taps "Retry" on a chunk that failed,
   /// and the viewport's poll alone would either wait out the backoff or skip
-  /// the chunk if the user is no longer near it. This cancels any pending
-  /// retry timer, resets the backoff step, and fires a fresh fetch scoped to
-  /// the single chunk. A new fan-out / poll cycle will fold neighbouring
-  /// missing chunks in afterwards if needed.
+  /// the chunk if the user is no longer near it. Resets the backoff step
+  /// and fires a fresh fetch scoped to the single chunk.
   ///
-  /// No-op when the chunk does not exist or is already loaded successfully.
+  /// Cancels any in-flight fetch (the source orchestrates a single fetch
+  /// slot). When the cancelled range covered chunks the user is still
+  /// looking at, the next layout's poll will re-fold them in — so user-tap
+  /// retries during heavy scrolling can throw away a network round-trip.
+  /// The trade-off favours the visible chunk the user clicked on.
+  ///
+  /// No-op when the chunk is already loaded successfully. When the chunk
+  /// does not exist yet, a fresh fetch is launched.
   void retryChunk(int messageId) {
     final chunkIndex = ChatScrollChunk.chunkOf(messageId);
     final chunk = _chunks[chunkIndex];
-    // Already valid → nothing to retry. (A chunk currently fetching is also
-    // fine to retry: the cancel below drops the in-flight token before we
-    // re-launch, so we don't double-fetch.)
     if (chunk != null && chunk.status.isValid) return;
 
     _cancelFetch();
@@ -358,12 +360,17 @@ abstract class ChatDataSource {
           chunk.messages[msg.id - chunk.firstId] = msg;
         }
         for (final ci in _fetchingChunks) {
-          _chunks[ci]?.status = ChatMessageStatus.valid;
+          final chunk = _chunks[ci];
+          if (chunk == null) continue;
+          chunk
+            ..status = ChatMessageStatus.valid
+            ..lastError = null
+            ..failedAttempts = 0;
         }
         _fetchingChunks.clear();
         notifyDataChanged();
       },
-      onError: (Object _) {
+      onError: (Object error) {
         if (_fetchToken != token) return; // cancelled or replaced
         _fetchToken = null;
 
@@ -373,6 +380,9 @@ abstract class ChatDataSource {
         for (final ci in _fetchingChunks) {
           final chunk = _chunks[ci];
           if (chunk == null) continue;
+          chunk
+            ..lastError = error
+            ..failedAttempts += 1;
           chunk.status = chunk.status
               .remove(ChatMessageStatus.fetching)
               .add(ChatMessageStatus.error);

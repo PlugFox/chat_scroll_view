@@ -39,4 +39,13 @@ class ChatScrollChunk {
 
   /// Monotonic access tick — bumped on layout to track LRU order.
   int lastAccessTick = 0;
+
+  /// Last error thrown by a fetch of this chunk, or `null` when the chunk
+  /// has never failed (or recovered to `valid`). Cleared on success.
+  Object? lastError;
+
+  /// Count of failed fetches for this chunk since the last success. Reset to
+  /// 0 on a successful fetch. Includes both auto-retries (backoff timer)
+  /// and user-driven retries — what the UI typically wants to show.
+  int failedAttempts = 0;
 }

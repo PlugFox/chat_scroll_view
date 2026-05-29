@@ -9,6 +9,7 @@ import 'package:chatscrollview/src/chat_scroll/chat_scroll_events.dart';
 import 'package:chatscrollview/src/chat_widgets/chat_scrollbar.dart';
 import 'package:flutter/animation.dart' show Curve, Curves;
 import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:meta/meta.dart' show internal;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
@@ -38,20 +39,24 @@ class ChatMessageParentData extends ParentData {
   double dividerOpacity = 1.0;
 }
 
-/// Kind of full-viewport overlay the element is asked to build.
+/// Kind of full-viewport overlay the element is asked to build. Internal
+/// contract between `RenderChatScrollView` and `ChatScrollElement`.
 ///
 /// * `loading` — the data source has nothing yet ([ChatDataSource.isInitialLoading]).
 /// * `empty` — the data source confirmed the conversation has no messages
 ///   ([ChatDataSource.isEmpty]).
 /// * `none` — no overlay, the viewport is in normal fan-out mode (used to ask
 ///   the element to drop a previously-built overlay).
+@internal
 enum ChatOverlayKind { none, loading, empty }
 
-/// Contract the render object uses to lazily inflate / dispose message widgets.
+/// Contract the render object uses to lazily inflate / dispose children.
 ///
-/// Implemented by `ChatScrollElement`. The render object calls [buildChild]
-/// during `performLayout` (wrapped in `invokeLayoutCallback`) and
-/// [removeChildren] to garbage-collect children outside the build range.
+/// Implemented by `ChatScrollElement` only. The render object calls the
+/// build methods during `performLayout` (wrapped in `invokeLayoutCallback`)
+/// and the remove methods to garbage-collect children outside the build
+/// range. Public API consumers should never implement or call this directly.
+@internal
 abstract interface class ChatChildManager {
   /// Inflate or update the widget for message [id]; returns its render box.
   /// [startsNewDay] asks the element to prepend an inline date separator.
@@ -65,9 +70,7 @@ abstract interface class ChatChildManager {
   RenderBox? buildFloatingHeader(DateTime? date);
 
   /// Inflate or update the chunk-error tile for [chunkIndex]. Called when
-  /// the chunk is in error state *and* an `errorBuilder` was supplied; the
-  /// element invokes that builder with [firstId]/[lastId] and a `retry`
-  /// closure that calls `dataSource.retryChunk`.
+  /// the chunk is in error state *and* a `chunkErrorBuilder` was supplied.
   RenderBox? buildChunkError(int chunkIndex, int firstId, int lastId);
 
   /// Deactivate chunk-error tiles for [chunkIndices] no longer in range.
@@ -791,11 +794,26 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     _layoutMaxChunk = -1;
     _headerBucket = null;
     _headerDate = null;
+    _headerDirty = false;
     _scrollVelocity = 0.0;
     _bottomPaddingDirty = false;
     _pendingScrollDelta = 0.0;
     _cancelFling();
     _cancelAnimate();
+    // An active drag survives a hit-test entry if the gesture arena already
+    // assigned the pointer to our recognizer. handleEvent's overlay-mode
+    // guard only blocks *new* pointers — the recognizer will keep dispatching
+    // onUpdate for the already-tracked pointer, mutating the anchor while
+    // the overlay paints. Re-creating the recognizer drops the active
+    // tracking without affecting future drag setup in normal mode.
+    if (_drag != null) {
+      _drag!.dispose();
+      _drag = VerticalDragGestureRecognizer()
+        ..onStart = _onDragStart
+        ..onUpdate = _onDragUpdate
+        ..onEnd = _onDragEnd;
+    }
+    _ticker?.stop();
     _evictChunks();
     _updateScrollSemantics();
     _publishVisibleRange();
@@ -836,15 +854,24 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     // Anchor: chunk-error tile when the anchor's chunk failed and a builder
     // was supplied; the actual message otherwise. The anchor's "size" then
     // determines where downward fan-out begins.
+    //
+    // No fallback to `_buildMessage` on a null chunk-error build: the chunk
+    // is errored, so 64 per-message slots would surface `status.isError`
+    // through `messageBuilder` — a one-frame flash of the very UI the
+    // chunk-error builder was wired to replace. Bail and let the next layout
+    // (after the builder swap settles) place the right tile.
     final anchorChunkIndex = ChatScrollChunk.chunkOf(anchorId);
-    RenderBox? anchor;
-    var anchorIsError = false;
+    final RenderBox? anchor;
+    final bool anchorIsError;
     if (_isChunkErrored(anchorChunkIndex)) {
       anchor = _buildChunkError(anchorChunkIndex, cc);
       anchorIsError = anchor != null;
+      if (anchor == null) return;
+    } else {
+      anchor = _buildMessage(anchorId, cc);
+      anchorIsError = false;
+      if (anchor == null) return;
     }
-    anchor ??= _buildMessage(anchorId, cc);
-    if (anchor == null) return;
     final anchorTop = _controller.anchorPixelOffset;
     _setOffset(anchor, anchorTop);
     if (anchorIsError) {
@@ -950,6 +977,12 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// fetches, …).
   ({RenderBox box, bool isChunkError})? _resolveAnchorBox() {
     final anchorId = _controller.anchorMessageId;
+    // Fast path for the dominant valid-data-only case: skip the
+    // chunk-error map lookup entirely when no chunk has errored.
+    if (_chunkErrors.isEmpty) {
+      final msg = _children[anchorId];
+      return msg == null ? null : (box: msg, isChunkError: false);
+    }
     final anchorChunkIndex = ChatScrollChunk.chunkOf(anchorId);
     final errorTile = _chunkErrors[anchorChunkIndex];
     if (errorTile != null) {
@@ -1102,6 +1135,13 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     final resolved = _resolveAnchorBox();
     if (resolved == null) return;
     final anchor = resolved.box;
+    // Tier-1 hot path: when no chunk errored, drop every per-id chunk-error
+    // probe and walk the message map alone (the original O(visible) loop).
+    if (_chunkErrors.isEmpty) {
+      _repositionMessagesOnly(anchor);
+      return;
+    }
+
     final anchorIsError = resolved.isChunkError;
     final anchorChunkIndex = ChatScrollChunk.chunkOf(
       _controller.anchorMessageId,
@@ -1156,6 +1196,28 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       y -= child.size.height;
       _setOffset(child, y);
       id--;
+    }
+  }
+
+  /// Tier-1 fast path: only message tiles. Avoids the per-id chunk-error
+  /// boundary probe and tree lookup that the general path performs.
+  void _repositionMessagesOnly(RenderBox anchor) {
+    final anchorId = _controller.anchorMessageId;
+    var y = _controller.anchorPixelOffset;
+    _setOffset(anchor, y);
+    y += anchor.size.height;
+    for (var id = anchorId + 1; ; id++) {
+      final child = _children[id];
+      if (child == null) break;
+      _setOffset(child, y);
+      y += child.size.height;
+    }
+    y = _controller.anchorPixelOffset;
+    for (var id = anchorId - 1; ; id--) {
+      final child = _children[id];
+      if (child == null) break;
+      y -= child.size.height;
+      _setOffset(child, y);
     }
   }
 
@@ -1435,6 +1497,16 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// children and calls [markNeedsPaint] (Tier 1). Falls back to
   /// [markNeedsLayout] only when the built range no longer covers the viewport.
   void _onTick(Duration elapsed) {
+    // Overlay mode owns the viewport — no scroll, no fling, no animate. A
+    // ticker that survives the transition (or a stray re-arm) must not
+    // mutate the anchor while no children are positioned.
+    if (_overlayKind != ChatOverlayKind.none) {
+      _pendingScrollDelta = 0.0;
+      _cancelFling();
+      _cancelAnimate();
+      _ticker?.stop();
+      return;
+    }
     _markScrollActive();
     var delta = _pendingScrollDelta;
     _pendingScrollDelta = 0.0;
@@ -1488,31 +1560,46 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   /// Considers both message tiles and chunk-error tiles — the latter may be
   /// the outermost build at a boundary (e.g. the anchor's chunk errored).
   bool _rangeNoLongerCovers() {
-    if (_children.isEmpty && _chunkErrors.isEmpty) return true;
+    // Tier-1 hot path: the inline walk below allocates no closures and uses
+    // the same min/max accumulation that the original (messages-only)
+    // implementation did.
+    final hasMessages = _children.isNotEmpty;
+    final hasErrors = _chunkErrors.isNotEmpty;
+    if (!hasMessages && !hasErrors) return true;
 
-    // Outer top/bottom across both maps.
     double topY = double.infinity;
     double bottomY = double.negativeInfinity;
     int firstId = 1 << 62;
     int lastId = -(1 << 62);
 
-    void consider(int id, RenderBox box) {
-      final pd = _parentData(box);
-      if (pd.offset < topY) topY = pd.offset;
-      final b = pd.offset + box.size.height;
-      if (b > bottomY) bottomY = b;
-      if (id < firstId) firstId = id;
-      if (id > lastId) lastId = id;
+    if (hasMessages) {
+      // Sorted by id — the outermost id bounds are the first and last keys.
+      // Offsets must still be scanned in full because mid-range entries can
+      // dictate top/bottom when the directional lead biased the fan-out.
+      final fk = _children.firstKey()!;
+      final lk = _children.lastKey()!;
+      if (fk < firstId) firstId = fk;
+      if (lk > lastId) lastId = lk;
+      for (final box in _children.values) {
+        final pd = _parentData(box);
+        if (pd.offset < topY) topY = pd.offset;
+        final b = pd.offset + box.size.height;
+        if (b > bottomY) bottomY = b;
+      }
     }
-
-    for (final e in _children.entries) {
-      consider(e.key, e.value);
-    }
-    for (final e in _chunkErrors.entries) {
-      // A chunk-error tile represents its entire chunk; use the chunk's
-      // first / last ids for the boundary-comparison below.
-      consider(ChatScrollChunk.firstIdOf(e.key), e.value);
-      consider(ChatScrollChunk.firstIdOf(e.key + 1) - 1, e.value);
+    if (hasErrors) {
+      final fc = _chunkErrors.firstKey()!;
+      final lc = _chunkErrors.lastKey()!;
+      final eFirst = ChatScrollChunk.firstIdOf(fc);
+      final eLast = ChatScrollChunk.firstIdOf(lc + 1) - 1;
+      if (eFirst < firstId) firstId = eFirst;
+      if (eLast > lastId) lastId = eLast;
+      for (final box in _chunkErrors.values) {
+        final pd = _parentData(box);
+        if (pd.offset < topY) topY = pd.offset;
+        final b = pd.offset + box.size.height;
+        if (b > bottomY) bottomY = b;
+      }
     }
 
     if (topY > size.height || bottomY < 0) return true;
@@ -1671,10 +1758,12 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
     }
 
     final viewportHeight = size.height;
-    for (final child in _children.values) {
+    // Mirror paint order: chunk-error tiles paint on top of message tiles
+    // (the second paint loop). Hit-test them first so a tap on the Retry
+    // button is not absorbed by a co-existing message tile during a
+    // chunk's error → valid transition frame.
+    for (final child in _chunkErrors.values) {
       final pd = _parentData(child);
-      // Only on-screen children are hit-testable — off-screen build-extent
-      // children may hold a stale offset.
       if (pd.offset >= viewportHeight || pd.offset + child.size.height <= 0) {
         continue;
       }
@@ -1686,8 +1775,10 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       );
       if (hit) return true;
     }
-    for (final child in _chunkErrors.values) {
+    for (final child in _children.values) {
       final pd = _parentData(child);
+      // Only on-screen children are hit-testable — off-screen build-extent
+      // children may hold a stale offset.
       if (pd.offset >= viewportHeight || pd.offset + child.size.height <= 0) {
         continue;
       }
@@ -1748,6 +1839,26 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
       firstId ??= entry.key;
       lastId = entry.key;
     }
+    // Chunk-error tiles count as visible id coverage — their chunks' id range
+    // is what the listener (mark-as-read, lazy media) cares about, even when
+    // the actual messages are not built.
+    for (final entry in _chunkErrors.entries) {
+      final child = entry.value;
+      final pd = _parentData(child);
+      final childTop = pd.offset;
+      final childBottom = childTop + child.size.height;
+      if (childBottom <= topEdge || childTop >= bottomEdge) continue;
+      final chunkFirst = ChatScrollChunk.firstIdOf(entry.key);
+      final chunkLast = chunkFirst + ChatScrollChunk.kSize - 1;
+      final priorFirst = firstId;
+      final priorLast = lastId;
+      firstId = priorFirst == null || chunkFirst < priorFirst
+          ? chunkFirst
+          : priorFirst;
+      lastId = priorLast == null || chunkLast > priorLast
+          ? chunkLast
+          : priorLast;
+    }
     if (firstId == null || lastId == null) {
       _controller.visibleRange = null;
       return;
@@ -1797,20 +1908,23 @@ class RenderChatScrollView extends RenderBox implements ChatScrollAnimator {
   }
 
   bool _computeCanRevealOlder() {
-    if (_children.isEmpty) return false;
+    if (_children.isEmpty && _chunkErrors.isEmpty) return false;
     final oldest = _dataSource.oldestKnownId;
     if (oldest != null && _dataSource.reachedOldest) {
-      final first = _children[oldest];
+      // `_boundaryBox` mirrors what `_clampBoundaries` pins to, so semantics
+      // agree with the clamp — assistive tech does not announce scrollable
+      // history that the next layout will bounce back into place.
+      final first = _boundaryBox(oldest);
       if (first != null && _parentData(first).offset >= -0.5) return false;
     }
     return true;
   }
 
   bool _computeCanRevealNewer() {
-    if (_children.isEmpty) return false;
+    if (_children.isEmpty && _chunkErrors.isEmpty) return false;
     final newest = _dataSource.newestKnownId;
     if (newest != null && _dataSource.reachedNewest) {
-      final last = _children[newest];
+      final last = _boundaryBox(newest);
       if (last != null &&
           _parentData(last).offset + last.size.height <=
               size.height - _bottomPad + 0.5) {

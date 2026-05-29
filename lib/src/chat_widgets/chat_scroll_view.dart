@@ -12,6 +12,12 @@ import 'package:flutter/widgets.dart';
 /// [message] is `null` when the message is not loaded yet (its chunk is being
 /// fetched) — return a shimmer/placeholder in that case. [status] reflects the
 /// owning chunk's fetch state (dirty / fetching / error / valid).
+///
+/// When [ChatScrollView.chunkErrorBuilder] is wired *and* the message's
+/// chunk is in error state, this builder is **not** invoked for any id in
+/// that chunk — the chunk renders as a single chunk-level tile instead.
+/// Without that builder, ids in the errored chunk are passed to this builder
+/// with `status.isError == true`.
 typedef ChatMessageBuilder =
     Widget Function(
       BuildContext context,
@@ -27,22 +33,39 @@ typedef ChatMessageBuilder =
 typedef ChatDateSeparatorBuilder =
     Widget Function(BuildContext context, DateTime date);
 
-/// Range of message ids covered by a single chat chunk, passed to
-/// [ChatChunkErrorBuilder].
-typedef ChatChunkRange = ({int firstId, int lastId});
+/// Information passed to a [ChatChunkErrorBuilder] when its chunk has failed
+/// to load.
+///
+/// * [chunkIndex] — pagination index of the chunk (id `>> 6`); useful for
+///   logging or chunk-scoped diagnostics.
+/// * [firstId] / [lastId] — inclusive id range the chunk would cover when
+///   fully loaded. The conversation's actual boundaries may sit inside this
+///   range — clamp against `ChatDataSource.oldestKnownId` /
+///   `newestKnownId` if your UI needs the visible portion.
+/// * [error] — the last exception thrown by `fetchRange`. `null` only on
+///   the first frame before any fetch resolved, which is unusual since the
+///   builder is invoked once the chunk's status is `error`.
+/// * [attempt] — count of failed fetch attempts since the last success (both
+///   automatic-backoff and user-driven retries). Use it to render copy like
+///   "Still failing (attempt 3)".
+/// * [retry] — fire-and-forget callback that cancels any pending backoff and
+///   re-fetches the chunk immediately.
+typedef ChatChunkErrorDetails = ({
+  int chunkIndex,
+  int firstId,
+  int lastId,
+  Object? error,
+  int attempt,
+  VoidCallback retry,
+});
 
 /// Builds the error widget shown in place of an entire failed chunk.
 ///
 /// One widget per chunk — not 64 per-message tiles — sits where the chunk
-/// would have lived, sized to its own intrinsic height. Tap [retry] to
-/// re-fetch that chunk (cancels the running backoff timer and fires
-/// immediately).
+/// would have lived, sized to its own intrinsic height. See
+/// [ChatChunkErrorDetails] for the data handed in and the retry hook.
 typedef ChatChunkErrorBuilder =
-    Widget Function(
-      BuildContext context,
-      ChatChunkRange chunk,
-      VoidCallback retry,
-    );
+    Widget Function(BuildContext context, ChatChunkErrorDetails details);
 
 /// Default day grouping — the local calendar day. A `DateTime` with
 /// hours/minutes/seconds zeroed is equatable enough for the day-bucket gate;
@@ -68,7 +91,7 @@ class ChatScrollView extends RenderObjectWidget {
     required this.dataSource,
     required this.controller,
     required this.messageBuilder,
-    this.errorBuilder,
+    this.chunkErrorBuilder,
     this.emptyBuilder,
     this.loadingBuilder,
     this.selectionController,
@@ -96,28 +119,38 @@ class ChatScrollView extends RenderObjectWidget {
   /// Builds the failure tile shown in place of an entire errored chunk.
   ///
   /// When set, an errored chunk in the build range is replaced by **one**
-  /// widget (sized to its own intrinsic height) rather than 64 per-message
-  /// placeholders carrying `status.isError`. When `null`, falls back to the
-  /// per-message path — the [messageBuilder] still receives the error
-  /// status for every id in the chunk and chooses what to render.
+  /// widget (sized to its own intrinsic height) rather than per-message
+  /// placeholders carrying `status.isError`. When this builder fires,
+  /// [messageBuilder] is **not** called for any id in that chunk —
+  /// chunk-level rendering fully replaces per-message rendering for the
+  /// affected range. When `null`, falls back to the per-message path —
+  /// [messageBuilder] receives the error status for every id and chooses
+  /// what to render.
   ///
-  /// The supplied retry callback cancels the running backoff and re-fetches
-  /// the chunk immediately. Pass a stable reference, like [messageBuilder].
-  final ChatChunkErrorBuilder? errorBuilder;
+  /// The supplied [ChatChunkErrorDetails.retry] cancels the running backoff
+  /// and re-fetches the chunk immediately. Pass a stable reference, like
+  /// [messageBuilder].
+  final ChatChunkErrorBuilder? chunkErrorBuilder;
 
   /// Builds the full-viewport widget shown when the conversation is known to
   /// be empty (data source reports [ChatDataSource.isEmpty]).
   ///
   /// When `null`, the viewport simply renders nothing — `messageBuilder`
   /// is never called because no ids exist.
+  ///
+  /// Like [loadingBuilder] and [chunkErrorBuilder], invoked during the
+  /// viewport's layout pass — avoid triggering `setState` / `markNeedsLayout`
+  /// synchronously from inside this builder.
   final WidgetBuilder? emptyBuilder;
 
   /// Builds the full-viewport skeleton shown before the first chunk lands
   /// (data source reports [ChatDataSource.isInitialLoading]).
   ///
-  /// When `null`, the viewport falls back to the existing path — shimmer
-  /// placeholders from `messageBuilder(id, null, fetching)` fan out from
-  /// the anchor while the first page loads.
+  /// When `null`, the viewport falls back to the standard fan-out path: the
+  /// `messageBuilder` is invoked with `message: null` and a fetching status
+  /// for ids around the anchor, and whatever placeholder *your* builder
+  /// produces in that case (shimmer, blank space, …) fills the viewport.
+  /// The package itself does not ship a built-in placeholder.
   final WidgetBuilder? loadingBuilder;
 
   /// Optional whole-message selection. When non-null every message is wrapped
@@ -211,7 +244,7 @@ class ChatScrollView extends RenderObjectWidget {
         bottomPadding: bottomPadding,
         topPadding: topPadding,
         groupBy: _effectiveGroupBy,
-        hasErrorBuilder: errorBuilder != null,
+        hasErrorBuilder: chunkErrorBuilder != null,
         hasEmptyBuilder: emptyBuilder != null,
         hasLoadingBuilder: loadingBuilder != null,
       );
@@ -231,7 +264,7 @@ class ChatScrollView extends RenderObjectWidget {
       ..bottomPadding = bottomPadding
       ..topPadding = topPadding
       ..groupBy = _effectiveGroupBy
-      ..hasErrorBuilder = errorBuilder != null
+      ..hasErrorBuilder = chunkErrorBuilder != null
       ..hasEmptyBuilder = emptyBuilder != null
       ..hasLoadingBuilder = loadingBuilder != null;
   }
